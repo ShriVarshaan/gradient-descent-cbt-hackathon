@@ -1,5 +1,10 @@
 numpy
 pandas
 pyarrow
+scipy
+scikit-learn
+xgboost
+lightgbm
+catboost
 torch
 torch_geometric

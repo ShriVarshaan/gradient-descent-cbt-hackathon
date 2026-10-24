@@ -1,0 +1,44 @@
+{
+  "n_features": 340,
+  "zero_leakage_temporal_val_metrics": {
+    "inductive_motif_gnn_ap": 0.49877825177336427,
+    "inductive_motif_gnn_auc": 0.812870217010337,
+    "catboost_d6_ap": 0.6552295258725563,
+    "catboost_d6_auc": 0.9549847167706834,
+    "catboost_d7_ap": 0.6461997505803045,
+    "catboost_d7_auc": 0.9571638854010728,
+    "catboost_d5_ap": 0.644193580916281,
+    "catboost_d5_auc": 0.9523713171123587,
+    "xgb_d6_ap": 0.646294454553101,
+    "xgb_d6_auc": 0.952496027061558,
+    "xgb_d5_ap": 0.6465632011368814,
+    "xgb_d5_auc": 0.950562271584212,
+    "lgb_31_ap": 0.6165516275968359,
+    "lgb_31_auc": 0.9508292209935427,
+    "catboost_blend_ap": 0.6515596252732979,
+    "xgb_blend_ap": 0.649318505082893,
+    "full_ensemble_ap": 0.6542983997654849,
+    "full_ensemble_auc": 0.9569650506627908
+  },
+  "contiguous_time_block_5fold_oof": {
+    "oof_ap": 0.6368792813359225,
+    "oof_auc": 0.9342237493891618
+  },
+  "top_15_features": {
+    "adv_etcc360_nacc": 0.12892866134643555,
+    "adv_etcc360_ntx": 0.1211950033903122,
+    "adv_etcc360_density": 0.12039004266262054,
+    "adv_etcc240_ntx": 0.03119760937988758,
+    "adv_etcc120_nacc": 0.02289394661784172,
+    "adv_etcc240_nacc": 0.021389098837971687,
+    "adv_etcc120_density": 0.019590577110648155,
+    "adv_atcc300du_pt_ratio": 0.018692106008529663,
+    "adv_atcc300du_dest_ratio": 0.009514200501143932,
+    "adv_achain300_tot": 0.009045316837728024,
+    "adv_etcc240_density": 0.008337083272635937,
+    "adv_atcc120_ntx": 0.007906733080744743,
+    "gnn_p1_mean_tx_log_pair_cnt": 0.006701884791254997,
+    "adv_dp_span": 0.0062551843002438545,
+    "adv_etcc120_usd_cv": 0.006197405979037285
+  }
+}
