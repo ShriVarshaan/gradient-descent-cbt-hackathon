@@ -1,3 +1,4 @@
+catboost==1.2.10
 lightgbm==4.7.0
 numpy==2.5.1
 pandas==3.1.0
@@ -7,3 +8,4 @@ scikit-learn==1.9.1
 scipy==1.18.1
 torch==2.14.1
 torch_geometric==2.8.1
+xgboost==3.4.1

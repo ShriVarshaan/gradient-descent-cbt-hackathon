@@ -33,3 +33,7 @@ MEMBER_A_GUIDE.md
 submission*.csv
 oof/
 code.zip
+
+# Generated caches / training logs
+cache/
+catboost_info/

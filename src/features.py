@@ -2,7 +2,9 @@
 
 Basic features come from our Step 1 tables. FX features (leg, USD payment and
 account behaviour) come from feature/feature-engineering. Graph-context features come
-from the gnn branch (see graph_features.py). All are merged on TRANSACTION_HASH.
+from the gnn branch (see graph_features.py). History features (point-in-time activity,
+pass-through, multi-hop and cycle patterns) come from feature/feature-engineering
+(see history_features.py). All are merged on TRANSACTION_HASH.
 """
 import sys
 from pathlib import Path
@@ -15,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from graph_features import GRAPH_FEATURES, build_graph_features
+from history_features import HISTORY_FEATURES, build_history_features
 from payments import project
 from prepare import add_usd, join_blocks, parse_payments
 
@@ -56,6 +59,7 @@ FX_FEATURES = [
 ]
 
 FEATURES = BASIC_FEATURES + FX_FEATURES + GRAPH_FEATURES
+ALL_FEATURES = FEATURES + HISTORY_FEATURES
 
 
 
@@ -202,14 +206,17 @@ def build_basic_features(tables):
     return out.drop(columns=["destination", "delivered_currency", "delivered_issuer"])
 
 
-def build_fx_features(tables):
+def project_payments(tables):
     rates = {
         (int(r["TIMESTAMP"]), r["ASSET"]): int(r["PRICE_MICRO_USD"])
         for r in tables["market_rates"].to_dict("records")
     }
     payments = pd.DataFrame(project(tables["transactions"].to_dict("records"), rates))
     payments["usd_value"] = pd.to_numeric(payments["VALUE"], errors="coerce")
+    return payments
 
+
+def build_fx_features(tables, payments):
     leg_features = build_leg_features(tables["transfers"])
     payment_features = build_payment_features(payments)
     account_features = build_account_features(payments)
@@ -226,7 +233,10 @@ def build_fx_features(tables):
 
 def build_features(tables):
     basic = build_basic_features(tables)
-    fx = build_fx_features(tables)
+    payments = project_payments(tables)
+    fx = build_fx_features(tables, payments)
     graph = build_graph_features(tables)
+    history = build_history_features(tables["transactions"], tables["transfers"], payments)
     out = basic.merge(fx, on="TRANSACTION_HASH", how="left", validate="one_to_one")
-    return out.merge(graph, on="TRANSACTION_HASH", how="left", validate="one_to_one")
+    out = out.merge(graph, on="TRANSACTION_HASH", how="left", validate="one_to_one")
+    return out.merge(history, on="TRANSACTION_HASH", how="left", validate="one_to_one")
