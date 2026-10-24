@@ -1,7 +1,8 @@
 """Features: one row per transaction, built from the Step 1 tables.
 
 Basic features come from our Step 1 tables. FX features (leg, USD payment and
-account behaviour) come from feature/feature-engineering. Graph-context features come
+account behaviour) and HISTORY_FEATURES (history_features.py) come from
+feature/feature-engineering. Graph-context features come
 from the gnn branch (see graph_features.py). Short-window motif features are in
 motif_features.py. All are merged on TRANSACTION_HASH.
 """
@@ -16,7 +17,16 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from graph_features import GRAPH_FEATURES, build_graph_features
-from motif_features import MOTIF_FEATURES, build_motif_features
+from history_features import (
+    HISTORY_FEATURES,
+    build_behavior_features,
+    build_flow_features,
+    build_historical_account_graph_features,
+    build_laundering_pattern_features,
+    build_time_features,
+    build_xrpl_features,
+)
+from motif_features import MOTIF_FEATURES, RARE_FEATURES, build_motif_features
 from payments import project
 from prepare import add_usd, join_blocks, parse_payments
 
@@ -57,7 +67,7 @@ FX_FEATURES = [
     "receiver_avg_usd",
 ]
 
-FEATURES = BASIC_FEATURES + FX_FEATURES + GRAPH_FEATURES + MOTIF_FEATURES
+FEATURES = BASIC_FEATURES + FX_FEATURES + HISTORY_FEATURES + GRAPH_FEATURES + MOTIF_FEATURES + RARE_FEATURES
 
 
 
@@ -123,55 +133,6 @@ def build_payment_features(payments):
 
 
 # -----------------------------------------
-# 3. ACCOUNT BEHAVIOUR FEATURES
-# -----------------------------------------
-
-def build_account_features(payments):
-
-    # Outgoing account activity
-    outgoing = payments.groupby("FROM_ADDRESS").agg(
-        sender_tx_count=("TRANSACTION_HASH", "count"),
-        sender_total_usd=("usd_value", "sum"),
-        sender_unique_receivers=("TO_ADDRESS", "nunique"),
-    )
-
-    # Incoming account activity
-    incoming = payments.groupby("TO_ADDRESS").agg(
-        receiver_tx_count=("TRANSACTION_HASH", "count"),
-        receiver_total_usd=("usd_value", "sum"),
-        receiver_unique_senders=("FROM_ADDRESS", "nunique"),
-    )
-
-    features = payments[[
-        "TRANSACTION_HASH",
-        "FROM_ADDRESS",
-        "TO_ADDRESS"
-    ]].copy()
-
-    features = features.join(
-        outgoing, on="FROM_ADDRESS"
-    )
-
-    features = features.join(
-        incoming, on="TO_ADDRESS"
-    )
-
-    features["sender_avg_usd"] = (
-        features["sender_total_usd"]
-        / features["sender_tx_count"].clip(lower=1)
-    )
-
-    features["receiver_avg_usd"] = (
-        features["receiver_total_usd"]
-        / features["receiver_tx_count"].clip(lower=1)
-    )
-
-    return features.drop(
-        columns=["FROM_ADDRESS", "TO_ADDRESS"]
-    )
-
-
-# -----------------------------------------
 # 4. COMBINE ALL FEATURES
 # -----------------------------------------
 
@@ -214,14 +175,21 @@ def build_fx_features(tables):
 
     leg_features = build_leg_features(tables["transfers"])
     payment_features = build_payment_features(payments)
-    account_features = build_account_features(payments)
 
     features = leg_features.merge(
         payment_features, on="TRANSACTION_HASH", how="left", validate="one_to_one"
     )
-    features = features.merge(
-        account_features, on="TRANSACTION_HASH", how="left", validate="one_to_one"
-    )
+    for additional in [
+        build_historical_account_graph_features(payments),
+        build_time_features(payments),
+        build_flow_features(payments),
+        build_xrpl_features(tables["transactions"], tables["transfers"]),
+        build_behavior_features(payments),
+        build_laundering_pattern_features(payments),
+    ]:
+        features = features.merge(
+            additional, on="TRANSACTION_HASH", how="left", validate="one_to_one"
+        )
     assert features["TRANSACTION_HASH"].is_unique
     return features
 

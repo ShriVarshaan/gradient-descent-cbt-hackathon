@@ -9,7 +9,7 @@ import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.metrics import average_precision_score
 
-from cv import time_folds
+from cv import holdout_mask, time_folds
 from features import FEATURES, build_features
 from prepare import load_tables
 
@@ -45,9 +45,18 @@ def main(train_dir, test_dir, out_path):
     labelled = build_features(train_tables).merge(train_tables["labels"], on="TRANSACTION_HASH")
     labelled = labelled.assign(label=labelled["is_suspicious"]).sort_values("close_time").reset_index(drop=True)
 
-    cv = run_cv(labelled)
+    # The latest 20% by time is a holdout. CV and feature choices use only the first 80%.
+    is_hold = holdout_mask(labelled["close_time"].to_numpy())
+    dev, hold = labelled[~is_hold].reset_index(drop=True), labelled[is_hold].reset_index(drop=True)
+
+    cv = run_cv(dev)
     print(cv.to_string(index=False))
-    print(f"mean AP {cv['ap'].mean():.4f}")
+    print(f"CV mean AP (dev only) {cv['ap'].mean():.4f}")
+
+    # Scored once, with the settings already frozen above.
+    hold_model = LGBMClassifier(**PARAMS).fit(dev[FEATURES], dev["label"])
+    hold_ap = average_precision_score(hold["label"], hold_model.predict_proba(hold[FEATURES])[:, 1])
+    print(f"holdout AP (latest 20%, {len(hold)} rows, {int(hold['label'].sum())} suspicious) {hold_ap:.4f}")
 
     test = build_features(load_tables(test_dir)).reset_index(drop=True)
     test["score"] = fit_and_score(labelled, test)

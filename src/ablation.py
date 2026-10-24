@@ -7,7 +7,7 @@ from pathlib import Path
 
 from features import BASIC_FEATURES, FX_FEATURES, build_features
 from graph_features import GRAPH_FEATURES
-from motif_features import MOTIF_FEATURES
+from motif_features import MOTIF_FEATURES, RARE_FEATURES
 from pipeline import run_cv
 from prepare import load_tables
 
@@ -25,6 +25,7 @@ STEPS = [
     ("+ graph tx", BASIC_FEATURES + FX_FEATURES + GRAPH_TX),
     ("+ graph acc", BASIC_FEATURES + FX_FEATURES + GRAPH_FEATURES),
     ("+ motif", BASIC_FEATURES + FX_FEATURES + GRAPH_FEATURES + MOTIF_FEATURES),
+    ("+ new links", BASIC_FEATURES + FX_FEATURES + GRAPH_FEATURES + MOTIF_FEATURES + RARE_FEATURES),
 ]
 
 

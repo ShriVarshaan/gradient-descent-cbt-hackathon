@@ -14,3 +14,10 @@ def time_folds(close_time, n_bins=5, embargo_s=3600):
         train = np.flatnonzero((bin_id < k) & (t < edges[k] - embargo_s))
         folds.append((train, val))
     return folds
+
+
+def holdout_mask(close_time, frac=0.8):
+    """True for the latest (1 - frac) of transactions by time. Used once, to report a final score;
+    never for tuning or feature selection."""
+    t = np.asarray(close_time, dtype="int64")
+    return t > np.quantile(t, frac)

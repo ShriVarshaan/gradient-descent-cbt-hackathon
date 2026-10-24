@@ -22,6 +22,9 @@ MOTIF_FEATURES = (
     + [f"m_pair_{w}" for w in WINDOWS]
     + ["m_pair_total", "m_pair_first", "m_pair_rank"]
 )
+RARE_PAIR = 2  # a sender-destination pair seen at most this often in the week counts as a new link
+RARE_FEATURES = ([f"r_{role}_{w}" for w in WINDOWS for role in ROLES]
+                 + [f"r_{role}_frac_{w}" for w in WINDOWS for role in ROLES])
 
 
 def _index(acc, ts, cp):
@@ -78,4 +81,17 @@ def build_motif_features(tables):
     f["m_pair_total"] = np.log1p(np.bincount(pair)[pair])
     f["m_pair_first"] = (rank == 0).astype(float)
     f["m_pair_rank"] = np.log1p(rank)
+
+    # new links: how many of the account's payments in the window go over rarely used pairs
+    pair_total = np.bincount(pair)[pair]
+    rare = pair_total <= RARE_PAIR
+    rare_out = _index(src[rare], ts[rare], dst[rare])
+    rare_in = _index(dst[rare], ts[rare], src[rare])
+    rare_queries = {"s_out": (rare_out, src), "s_in": (rare_in, src),
+                    "d_in": (rare_in, dst), "d_out": (rare_out, dst)}
+    for w, half in WINDOWS.items():
+        for role, (index, acc) in rare_queries.items():
+            count = _window(index, acc, ts, half)[0]
+            f[f"r_{role}_{w}"] = np.log1p(count)
+            f[f"r_{role}_frac_{w}"] = count / np.maximum(np.expm1(f[f"m_{role}_{w}"]), 1)
     return f
