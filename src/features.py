@@ -13,7 +13,7 @@ from payments import load_payments
 
 
 # ============================================================
-# 1. TRANSACTION-LEVEL FEATURES
+# 1. TRANSACTION LEG FEATURES
 # ============================================================
 
 def build_leg_features(transfers):
@@ -53,7 +53,7 @@ def build_leg_features(transfers):
 
 
 # ============================================================
-# 2. USD PAYMENT FEATURES
+# 2. PAYMENT FEATURES
 # ============================================================
 
 def build_payment_features(payments):
@@ -73,42 +73,180 @@ def build_payment_features(payments):
 
 
 # ============================================================
-# 3. ACCOUNT BEHAVIOUR FEATURES
+# 3. HISTORICAL ACCOUNT AND GRAPH FEATURES
 # ============================================================
 
-def build_account_features(payments):
-    outgoing = payments.groupby("FROM_ADDRESS").agg(
-        sender_tx_count=("TRANSACTION_HASH", "count"),
-        sender_total_usd=("usd_value", "sum"),
-        sender_unique_receivers=("TO_ADDRESS", "nunique"),
-    )
-
-    incoming = payments.groupby("TO_ADDRESS").agg(
-        receiver_tx_count=("TRANSACTION_HASH", "count"),
-        receiver_total_usd=("usd_value", "sum"),
-        receiver_unique_senders=("FROM_ADDRESS", "nunique"),
-    )
-
-    features = payments[
-        ["TRANSACTION_HASH", "FROM_ADDRESS", "TO_ADDRESS"]
+def build_historical_account_graph_features(payments):
+    df = payments[
+        ["TRANSACTION_HASH", "FROM_ADDRESS",
+         "TO_ADDRESS", "TIMESTAMP", "usd_value"]
     ].copy()
 
-    features = features.join(outgoing, on="FROM_ADDRESS")
-    features = features.join(incoming, on="TO_ADDRESS")
-
-    features["sender_avg_usd"] = (
-        features["sender_total_usd"]
-        / features["sender_tx_count"].clip(lower=1)
+    df["TIMESTAMP"] = pd.to_numeric(
+        df["TIMESTAMP"], errors="raise"
     )
 
-    features["receiver_avg_usd"] = (
-        features["receiver_total_usd"]
-        / features["receiver_tx_count"].clip(lower=1)
+    df["usd_value"] = pd.to_numeric(
+        df["usd_value"], errors="coerce"
+    ).fillna(0)
+
+    df = df.sort_values(
+        ["TIMESTAMP", "TRANSACTION_HASH"]
+    ).reset_index(drop=True)
+
+    names = [
+        "sender_tx_count",
+        "sender_total_usd",
+        "sender_unique_receivers",
+        "receiver_tx_count",
+        "receiver_total_usd",
+        "receiver_unique_senders",
+        "sender_avg_usd",
+        "receiver_avg_usd",
+        "sender_flow_ratio",
+        "receiver_flow_ratio",
+        "sender_net_flow_usd",
+        "receiver_net_flow_usd",
+        "sender_out_degree",
+        "sender_in_degree",
+        "receiver_out_degree",
+        "receiver_in_degree",
+        "sender_degree_ratio",
+        "receiver_degree_ratio",
+        "is_reciprocal",
+        "pair_transaction_count",
+    ]
+
+    output = {
+        name: np.zeros(len(df), dtype=float)
+        for name in names
+    }
+
+    outgoing_count = defaultdict(int)
+    incoming_count = defaultdict(int)
+
+    outgoing_usd = defaultdict(float)
+    incoming_usd = defaultdict(float)
+
+    outgoing_neighbors = defaultdict(set)
+    incoming_neighbors = defaultdict(set)
+
+    pair_counts = defaultdict(int)
+
+    times = df["TIMESTAMP"].to_numpy()
+    senders = df["FROM_ADDRESS"].to_numpy()
+    receivers = df["TO_ADDRESS"].to_numpy()
+    values = df["usd_value"].to_numpy()
+
+    i = 0
+    n = len(df)
+
+    while i < n:
+        timestamp = times[i]
+
+        j = i + 1
+        while j < n and times[j] == timestamp:
+            j += 1
+
+        # Calculate features before updating current batch
+        for k in range(i, j):
+            sender = senders[k]
+            receiver = receivers[k]
+
+            s_out = outgoing_count[sender]
+            s_in = incoming_count[sender]
+            r_out = outgoing_count[receiver]
+            r_in = incoming_count[receiver]
+
+            s_out_usd = outgoing_usd[sender]
+            s_in_usd = incoming_usd[sender]
+            r_out_usd = outgoing_usd[receiver]
+            r_in_usd = incoming_usd[receiver]
+
+            output["sender_tx_count"][k] = s_out
+            output["sender_total_usd"][k] = s_out_usd
+            output["sender_unique_receivers"][k] = len(
+                outgoing_neighbors[sender]
+            )
+
+            output["receiver_tx_count"][k] = r_in
+            output["receiver_total_usd"][k] = r_in_usd
+            output["receiver_unique_senders"][k] = len(
+                incoming_neighbors[receiver]
+            )
+
+            output["sender_avg_usd"][k] = (
+                s_out_usd / max(s_out, 1)
+            )
+            output["receiver_avg_usd"][k] = (
+                r_in_usd / max(r_in, 1)
+            )
+
+            output["sender_flow_ratio"][k] = (
+                s_out_usd / (s_in_usd + 1.0)
+            )
+            output["receiver_flow_ratio"][k] = (
+                r_out_usd / (r_in_usd + 1.0)
+            )
+
+            output["sender_net_flow_usd"][k] = (
+                s_in_usd - s_out_usd
+            )
+            output["receiver_net_flow_usd"][k] = (
+                r_in_usd - r_out_usd
+            )
+
+            s_out_degree = len(outgoing_neighbors[sender])
+            s_in_degree = len(incoming_neighbors[sender])
+            r_out_degree = len(outgoing_neighbors[receiver])
+            r_in_degree = len(incoming_neighbors[receiver])
+
+            output["sender_out_degree"][k] = s_out_degree
+            output["sender_in_degree"][k] = s_in_degree
+            output["receiver_out_degree"][k] = r_out_degree
+            output["receiver_in_degree"][k] = r_in_degree
+
+            output["sender_degree_ratio"][k] = (
+                s_out_degree / (s_in_degree + 1)
+            )
+            output["receiver_degree_ratio"][k] = (
+                r_out_degree / (r_in_degree + 1)
+            )
+
+            output["is_reciprocal"][k] = int(
+                (receiver, sender) in pair_counts
+            )
+
+            output["pair_transaction_count"][k] = (
+                pair_counts[(sender, receiver)]
+            )
+
+        # Add current batch to historical state
+        for k in range(i, j):
+            sender = senders[k]
+            receiver = receivers[k]
+            value = values[k]
+
+            outgoing_count[sender] += 1
+            incoming_count[receiver] += 1
+
+            outgoing_usd[sender] += value
+            incoming_usd[receiver] += value
+
+            outgoing_neighbors[sender].add(receiver)
+            incoming_neighbors[receiver].add(sender)
+
+            pair_counts[(sender, receiver)] += 1
+
+        i = j
+
+    result = pd.DataFrame(output)
+    result.insert(
+        0, "TRANSACTION_HASH",
+        df["TRANSACTION_HASH"].to_numpy()
     )
 
-    return features.drop(
-        columns=["FROM_ADDRESS", "TO_ADDRESS"]
-    )
+    return result
 
 
 # ============================================================
@@ -172,7 +310,7 @@ def build_time_features(payments):
 
 
 # ============================================================
-# 5. RAPID PASS-THROUGH / FLOW FEATURES
+# 5. HISTORICAL FLOW FEATURES
 # ============================================================
 
 def build_flow_features(payments):
@@ -182,41 +320,11 @@ def build_flow_features(payments):
     ].copy()
 
     df["TIMESTAMP"] = pd.to_numeric(df["TIMESTAMP"])
+    df["usd_value"] = pd.to_numeric(
+        df["usd_value"], errors="coerce"
+    ).fillna(0)
+
     result = df[["TRANSACTION_HASH"]].copy()
-
-    incoming_total = df.groupby(
-        "TO_ADDRESS"
-    )["usd_value"].sum()
-
-    outgoing_total = df.groupby(
-        "FROM_ADDRESS"
-    )["usd_value"].sum()
-
-    sender_in = df["FROM_ADDRESS"].map(
-        incoming_total
-    ).fillna(0)
-
-    sender_out = df["FROM_ADDRESS"].map(
-        outgoing_total
-    ).fillna(0)
-
-    receiver_in = df["TO_ADDRESS"].map(
-        incoming_total
-    ).fillna(0)
-
-    receiver_out = df["TO_ADDRESS"].map(
-        outgoing_total
-    ).fillna(0)
-
-    result["sender_flow_ratio"] = (
-        sender_out / (sender_in + 1.0)
-    )
-    result["receiver_flow_ratio"] = (
-        receiver_out / (receiver_in + 1.0)
-    )
-
-    result["sender_net_flow_usd"] = sender_in - sender_out
-    result["receiver_net_flow_usd"] = receiver_in - receiver_out
 
     incoming_history = df.sort_values(
         ["TO_ADDRESS", "TIMESTAMP"]
@@ -335,77 +443,7 @@ def build_flow_features(payments):
 
 
 # ============================================================
-# 6. GRAPH-BASED FEATURES
-# ============================================================
-
-def build_graph_features(payments):
-    df = payments[
-        ["TRANSACTION_HASH", "FROM_ADDRESS", "TO_ADDRESS"]
-    ].copy()
-
-    outgoing = df.groupby(
-        "FROM_ADDRESS"
-    )["TO_ADDRESS"].nunique()
-
-    incoming = df.groupby(
-        "TO_ADDRESS"
-    )["FROM_ADDRESS"].nunique()
-
-    result = df[["TRANSACTION_HASH"]].copy()
-
-    result["sender_out_degree"] = (
-        df["FROM_ADDRESS"]
-        .map(outgoing).fillna(0).astype(int)
-    )
-    result["sender_in_degree"] = (
-        df["FROM_ADDRESS"]
-        .map(incoming).fillna(0).astype(int)
-    )
-    result["receiver_out_degree"] = (
-        df["TO_ADDRESS"]
-        .map(outgoing).fillna(0).astype(int)
-    )
-    result["receiver_in_degree"] = (
-        df["TO_ADDRESS"]
-        .map(incoming).fillna(0).astype(int)
-    )
-
-    result["sender_degree_ratio"] = (
-        result["sender_out_degree"]
-        / (result["sender_in_degree"] + 1)
-    )
-    result["receiver_degree_ratio"] = (
-        result["receiver_out_degree"]
-        / (result["receiver_in_degree"] + 1)
-    )
-
-    edges = set(
-        zip(df["FROM_ADDRESS"], df["TO_ADDRESS"])
-    )
-
-    result["is_reciprocal"] = [
-        int((receiver, sender) in edges)
-        for sender, receiver in zip(
-            df["FROM_ADDRESS"], df["TO_ADDRESS"]
-        )
-    ]
-
-    pair_counts = df.groupby(
-        ["FROM_ADDRESS", "TO_ADDRESS"]
-    ).size()
-
-    result["pair_transaction_count"] = [
-        pair_counts.loc[(sender, receiver)]
-        for sender, receiver in zip(
-            df["FROM_ADDRESS"], df["TO_ADDRESS"]
-        )
-    ]
-
-    return result
-
-
-# ============================================================
-# 7. XRPL-SPECIFIC FEATURES
+# 6. XRPL-SPECIFIC FEATURES
 # ============================================================
 
 def build_xrpl_features(transactions, transfers):
@@ -468,7 +506,7 @@ def build_xrpl_features(transactions, transfers):
 
 
 # ============================================================
-# 8. 7-DAY ACTIVITY, BURSTINESS AND ACCOUNT AGE
+# 7. 7-DAY ACTIVITY, BURSTINESS AND OBSERVED ACCOUNT AGE
 # ============================================================
 
 def build_behavior_features(payments):
@@ -581,7 +619,7 @@ def build_behavior_features(payments):
 
 
 # ============================================================
-# 9. MULTI-HOP / PASS-THROUGH / STRUCTURING FEATURES
+# 8. MULTI-HOP, PASS-THROUGH AND STRUCTURING FEATURES
 # ============================================================
 
 def build_laundering_pattern_features(payments):
@@ -643,7 +681,6 @@ def build_laundering_pattern_features(payments):
     while i < n:
         timestamp = times[i]
 
-        # Process identical timestamps together
         j = i + 1
         while j < n and times[j] == timestamp:
             j += 1
@@ -798,8 +835,6 @@ def build_laundering_pattern_features(payments):
                 (timestamp, sender, receiver, value, new_depth)
             )
 
-        # Only update histories after completing the
-        # entire timestamp batch.
         for t, sender, receiver, value, depth in pending:
             outgoing[sender].append(
                 (t, receiver, value, depth)
@@ -820,7 +855,7 @@ def build_laundering_pattern_features(payments):
 
 
 # ============================================================
-# 10. COMBINE ALL FEATURES
+# 9. COMBINE ALL FEATURES
 # ============================================================
 
 def build_features(directory):
@@ -844,10 +879,13 @@ def build_features(directory):
 
     leg_features = build_leg_features(transfers)
     payment_features = build_payment_features(payments)
-    account_features = build_account_features(payments)
+
+    historical_features = (
+        build_historical_account_graph_features(payments)
+    )
+
     time_features = build_time_features(payments)
     flow_features = build_flow_features(payments)
-    graph_features = build_graph_features(payments)
 
     xrpl_features = build_xrpl_features(
         transactions, transfers
@@ -867,10 +905,9 @@ def build_features(directory):
     )
 
     for additional in [
-        account_features,
+        historical_features,
         time_features,
         flow_features,
-        graph_features,
         xrpl_features,
         behavior_features,
         laundering_features
@@ -893,7 +930,7 @@ def build_features(directory):
 
 
 # ============================================================
-# 11. RUN AND EXPORT
+# 10. RUN AND EXPORT
 # ============================================================
 
 if __name__ == "__main__":
