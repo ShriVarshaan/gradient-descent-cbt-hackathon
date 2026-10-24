@@ -6,3 +6,5 @@ test/
 *_features.csv
 __pycache__/
 .idea/
+train_features_patterns.csv
+validation_features_patterns.csv
