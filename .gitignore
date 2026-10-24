@@ -1,2 +1,4 @@
 train-data/
 graphs/
+attempts/
+predictions.csv
