@@ -1,6 +1,7 @@
 
 import sys
 from pathlib import Path
+from collections import defaultdict, deque
 
 import numpy as np
 import pandas as pd
@@ -510,7 +511,6 @@ def build_behavior_features(payments):
                 dtype="float64"
             )
 
-            # Exclude transactions at the same timestamp
             end = np.searchsorted(
                 times, times, side="left"
             )
@@ -559,7 +559,6 @@ def build_behavior_features(payments):
             seconds_since_last
         )
 
-        # Activity compared with historical weekly average
         result[f"{prefix}_burst_ratio_24h"] = (
             (count_24h + 1)
             / (count_7d / 7.0 + 1)
@@ -582,7 +581,246 @@ def build_behavior_features(payments):
 
 
 # ============================================================
-# 9. COMBINE ALL FEATURES
+# 9. MULTI-HOP / PASS-THROUGH / STRUCTURING FEATURES
+# ============================================================
+
+def build_laundering_pattern_features(payments):
+    df = payments[
+        ["TRANSACTION_HASH", "FROM_ADDRESS",
+         "TO_ADDRESS", "TIMESTAMP", "usd_value"]
+    ].copy()
+
+    df["TIMESTAMP"] = pd.to_numeric(
+        df["TIMESTAMP"], errors="raise"
+    )
+    df["usd_value"] = pd.to_numeric(
+        df["usd_value"], errors="coerce"
+    ).fillna(0)
+
+    df = df.sort_values(
+        ["TIMESTAMP", "TRANSACTION_HASH"]
+    ).reset_index(drop=True)
+
+    n = len(df)
+
+    feature_names = [
+        "sender_recent_incoming_count_1h",
+        "sender_recent_incoming_usd_1h",
+        "sender_recent_incoming_count_24h",
+        "sender_recent_incoming_usd_24h",
+        "sender_upstream_unique_24h",
+        "sender_incoming_outgoing_similarity",
+        "sender_last_incoming_gap_seconds",
+        "sender_rapid_forwarding",
+        "sender_two_hop_chain",
+        "sender_three_hop_chain",
+        "sender_small_outgoing_count_24h",
+        "sender_small_outgoing_usd_24h",
+        "sender_small_payment_fraction_24h",
+        "sender_repeated_amount_count_24h",
+        "sender_outgoing_concentration_24h",
+        "sender_incoming_to_current_ratio",
+    ]
+
+    output = {
+        name: np.zeros(n, dtype=float)
+        for name in feature_names
+    }
+
+    incoming = defaultdict(deque)
+    outgoing = defaultdict(deque)
+
+    window = 86400
+    small_threshold = 1000.0
+
+    times = df["TIMESTAMP"].to_numpy()
+    senders = df["FROM_ADDRESS"].to_numpy()
+    receivers = df["TO_ADDRESS"].to_numpy()
+    values = df["usd_value"].to_numpy()
+
+    i = 0
+
+    while i < n:
+        timestamp = times[i]
+
+        # Process identical timestamps together
+        j = i + 1
+        while j < n and times[j] == timestamp:
+            j += 1
+
+        pending = []
+
+        for k in range(i, j):
+            sender = senders[k]
+            receiver = receivers[k]
+            value = values[k]
+
+            sender_in = incoming[sender]
+            sender_out = outgoing[sender]
+
+            while (
+                sender_in
+                and sender_in[0][0] < timestamp - window
+            ):
+                sender_in.popleft()
+
+            while (
+                sender_out
+                and sender_out[0][0] < timestamp - window
+            ):
+                sender_out.popleft()
+
+            in_24h = list(sender_in)
+            out_24h = list(sender_out)
+
+            in_1h = [
+                x for x in in_24h
+                if x[0] >= timestamp - 3600
+            ]
+
+            output[
+                "sender_recent_incoming_count_1h"
+            ][k] = len(in_1h)
+
+            output[
+                "sender_recent_incoming_usd_1h"
+            ][k] = sum(x[2] for x in in_1h)
+
+            output[
+                "sender_recent_incoming_count_24h"
+            ][k] = len(in_24h)
+
+            incoming_usd = sum(x[2] for x in in_24h)
+
+            output[
+                "sender_recent_incoming_usd_24h"
+            ][k] = incoming_usd
+
+            output[
+                "sender_upstream_unique_24h"
+            ][k] = len(set(x[1] for x in in_24h))
+
+            if in_24h:
+                last_incoming = in_24h[-1]
+                gap = timestamp - last_incoming[0]
+
+                output[
+                    "sender_last_incoming_gap_seconds"
+                ][k] = gap
+
+                output[
+                    "sender_rapid_forwarding"
+                ][k] = int(gap <= 3600)
+
+                incoming_amounts = np.array(
+                    [x[2] for x in in_24h]
+                )
+
+                similarities = (
+                    np.minimum(incoming_amounts, value)
+                    / np.maximum(
+                        np.maximum(incoming_amounts, value),
+                        1e-9
+                    )
+                )
+
+                output[
+                    "sender_incoming_outgoing_similarity"
+                ][k] = similarities.max()
+
+                output[
+                    "sender_incoming_to_current_ratio"
+                ][k] = incoming_usd / (value + 1.0)
+
+                depth = max(x[3] for x in in_24h)
+
+                output[
+                    "sender_two_hop_chain"
+                ][k] = int(depth >= 1)
+
+                output[
+                    "sender_three_hop_chain"
+                ][k] = int(depth >= 2)
+
+                new_depth = min(depth + 1, 3)
+
+            else:
+                output[
+                    "sender_last_incoming_gap_seconds"
+                ][k] = -1
+
+                new_depth = 0
+
+            small_outgoing = [
+                x for x in out_24h
+                if x[2] < small_threshold
+            ]
+
+            output[
+                "sender_small_outgoing_count_24h"
+            ][k] = len(small_outgoing)
+
+            output[
+                "sender_small_outgoing_usd_24h"
+            ][k] = sum(x[2] for x in small_outgoing)
+
+            output[
+                "sender_small_payment_fraction_24h"
+            ][k] = (
+                len(small_outgoing) / len(out_24h)
+                if out_24h else 0
+            )
+
+            output[
+                "sender_repeated_amount_count_24h"
+            ][k] = sum(
+                abs(x[2] - value)
+                <= max(value * 0.01, 0.01)
+                for x in out_24h
+            )
+
+            if out_24h:
+                by_receiver = defaultdict(float)
+
+                for _, counterparty, amount, _ in out_24h:
+                    by_receiver[counterparty] += amount
+
+                total = sum(by_receiver.values())
+
+                output[
+                    "sender_outgoing_concentration_24h"
+                ][k] = (
+                    max(by_receiver.values()) / total
+                    if total > 0 else 0
+                )
+
+            pending.append(
+                (timestamp, sender, receiver, value, new_depth)
+            )
+
+        # Only update histories after completing the
+        # entire timestamp batch.
+        for t, sender, receiver, value, depth in pending:
+            outgoing[sender].append(
+                (t, receiver, value, depth)
+            )
+            incoming[receiver].append(
+                (t, sender, value, depth)
+            )
+
+        i = j
+
+    result = pd.DataFrame(output)
+    result.insert(
+        0, "TRANSACTION_HASH",
+        df["TRANSACTION_HASH"].to_numpy()
+    )
+
+    return result
+
+
+# ============================================================
+# 10. COMBINE ALL FEATURES
 # ============================================================
 
 def build_features(directory):
@@ -617,6 +855,10 @@ def build_features(directory):
 
     behavior_features = build_behavior_features(payments)
 
+    laundering_features = build_laundering_pattern_features(
+        payments
+    )
+
     features = leg_features.merge(
         payment_features,
         on="TRANSACTION_HASH",
@@ -630,7 +872,8 @@ def build_features(directory):
         flow_features,
         graph_features,
         xrpl_features,
-        behavior_features
+        behavior_features,
+        laundering_features
     ]:
         features = features.merge(
             additional,
@@ -650,7 +893,7 @@ def build_features(directory):
 
 
 # ============================================================
-# 10. RUN AND EXPORT
+# 11. RUN AND EXPORT
 # ============================================================
 
 if __name__ == "__main__":
