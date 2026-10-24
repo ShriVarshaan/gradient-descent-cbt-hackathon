@@ -13,7 +13,9 @@ from cv import time_folds
 from features import FEATURES, build_features
 from prepare import load_tables
 
-PARAMS = dict(n_estimators=300, learning_rate=0.05, num_leaves=31, random_state=0, verbose=-1)
+# Tuned on the 4 time folds: every fold improves over the 300-tree, 31-leaf default.
+PARAMS = dict(n_estimators=800, learning_rate=0.02, num_leaves=63, min_child_samples=50,
+              random_state=0, verbose=-1)
 
 
 def run_cv(df, features=FEATURES):
