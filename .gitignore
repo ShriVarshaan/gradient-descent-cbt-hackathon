@@ -1,1 +1,8 @@
 train-data/
+train/
+validation/
+test/
+.venv/
+*_features.csv
+__pycache__/
+.idea/
