@@ -16,12 +16,12 @@ from prepare import load_tables
 PARAMS = dict(n_estimators=300, learning_rate=0.05, num_leaves=31, random_state=0, verbose=-1)
 
 
-def run_cv(df):
+def run_cv(df, features=FEATURES):
     rows = []
     for i, (tr, va) in enumerate(time_folds(df["close_time"].to_numpy())):
         train, val = df.iloc[tr], df.iloc[va]
-        model = LGBMClassifier(**PARAMS).fit(train[FEATURES], train["label"])
-        scores = model.predict_proba(val[FEATURES])[:, 1]
+        model = LGBMClassifier(**PARAMS).fit(train[features], train["label"])
+        scores = model.predict_proba(val[features])[:, 1]
         rows.append({
             "fold": i,
             "n_train": len(train),
