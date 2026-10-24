@@ -2,3 +2,8 @@ train-data/
 graphs/
 validation/
 gnn.zip
+
+# CatBoost training logs, graph caches, local venv
+gnn/catboost_info/
+gnn/graphs/
+.venv/

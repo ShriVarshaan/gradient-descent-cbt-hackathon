@@ -39,6 +39,8 @@ from build_graph import build
 from features_advanced import extract_all_domain_features
 from model import augment_hetero_graph
 
+SEED_OFFSET = 0  # set by --seed-offset; shifts every model seed for seed-averaged runs
+
 warnings.filterwarnings("ignore")
 
 
@@ -297,7 +299,15 @@ def main():
     parser.add_argument("--test-dir", type=Path, default=Path("test"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--out-csv", type=Path, default=Path("submission.csv"))
+    parser.add_argument("--pseudo", type=Path, default=None, help="Earlier test submission CSV used for pseudo-labels in the final refit")
+    parser.add_argument("--pseudo-pos", type=float, default=0.005, help="Top fraction of --pseudo scores labelled suspicious")
+    parser.add_argument("--pseudo-neg", type=float, default=0.5, help="Bottom fraction of --pseudo scores labelled legitimate")
+    parser.add_argument("--seed-offset", type=int, default=0, help="Added to every random seed")
+    parser.add_argument("--extra-train", type=Path, default=None, help="Parquet of extra train features keyed by TRANSACTION_HASH")
+    parser.add_argument("--extra-test", type=Path, default=None, help="Parquet of extra test features keyed by TRANSACTION_HASH")
     args = parser.parse_args()
+    global SEED_OFFSET
+    SEED_OFFSET = args.seed_offset
 
     t_start = time.time()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -344,6 +354,14 @@ def main():
 
     X_tr_all = pd.concat([df_tr_base, df_tr_g, adv_tr_df], axis=1)
     X_te_all = pd.concat([df_te_base, df_te_g, adv_te_df], axis=1)
+    if args.extra_train is not None:
+        # Extra feature table (e.g. the pipeline's v7 features), aligned to the graph's row order.
+        ex_tr = pd.read_parquet(args.extra_train).set_index("TRANSACTION_HASH").reindex(list(tr_hashes))
+        ex_te = pd.read_parquet(args.extra_test).set_index("TRANSACTION_HASH").reindex(list(te_hashes))
+        assert ex_tr.notna().all().all() and ex_te.notna().all().all(), "extra features missing for some hashes"
+        ex_tr.columns = ex_te.columns = [f"x_{c}" for c in ex_tr.columns]
+        X_tr_all = pd.concat([X_tr_all, ex_tr.reset_index(drop=True).astype("float32")], axis=1)
+        X_te_all = pd.concat([X_te_all, ex_te.reset_index(drop=True).astype("float32")], axis=1)
 
     assert list(X_tr_all.columns) == list(X_te_all.columns), "Train/Test column mismatch!"
     all_feats = list(X_tr_all.columns)
@@ -363,7 +381,7 @@ def main():
 
     print("\n================ Step 2: Evaluating on Strict Zero-Leakage Temporal Split ================")
     va_gnn_temp, oof_gnn_cb, te_gnn_cb, mgnn_temp_ap, mgnn_temp_auc = train_inductive_motif_gnn(
-        X_tr_all, y_all, ts_tr, tr_cids, X_te_all, te_cids, tr_m, va_m, n_folds=5, epochs=35, seed=42
+        X_tr_all, y_all, ts_tr, tr_cids, X_te_all, te_cids, tr_m, va_m, n_folds=5, epochs=35, seed=42 + SEED_OFFSET
     )
 
     X_tr, y_tr = X_tr_all.loc[tr_m], y_all[tr_m]
@@ -372,7 +390,7 @@ def main():
     # 1. CatBoost Depth 6
     cb6 = CatBoostClassifier(
         iterations=1000, depth=6, learning_rate=0.03, auto_class_weights="SqrtBalanced",
-        l2_leaf_reg=5.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=42, verbose=False,
+        l2_leaf_reg=5.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=42 + SEED_OFFSET, verbose=False,
     ).fit(X_tr, y_tr, eval_set=(X_va, y_va), verbose=False)
     p_cb6 = propagate_predictions_over_motifs(cb6.predict_proba(X_tr_all)[:, 1], tr_cids)
     ap_cb6, auc_cb6 = average_precision_score(y_va, p_cb6[va_m]), roc_auc_score(y_va, p_cb6[va_m])
@@ -381,7 +399,7 @@ def main():
     # 2. CatBoost Depth 7
     cb7 = CatBoostClassifier(
         iterations=1000, depth=7, learning_rate=0.025, auto_class_weights="SqrtBalanced",
-        l2_leaf_reg=6.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=77, verbose=False,
+        l2_leaf_reg=6.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=77 + SEED_OFFSET, verbose=False,
     ).fit(X_tr, y_tr, eval_set=(X_va, y_va), verbose=False)
     p_cb7 = propagate_predictions_over_motifs(cb7.predict_proba(X_tr_all)[:, 1], tr_cids)
     ap_cb7, auc_cb7 = average_precision_score(y_va, p_cb7[va_m]), roc_auc_score(y_va, p_cb7[va_m])
@@ -390,7 +408,7 @@ def main():
     # 3. CatBoost Depth 5
     cb5 = CatBoostClassifier(
         iterations=1000, depth=5, learning_rate=0.03, auto_class_weights="SqrtBalanced",
-        l2_leaf_reg=4.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=100, verbose=False,
+        l2_leaf_reg=4.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=100 + SEED_OFFSET, verbose=False,
     ).fit(X_tr, y_tr, eval_set=(X_va, y_va), verbose=False)
     p_cb5 = propagate_predictions_over_motifs(cb5.predict_proba(X_tr_all)[:, 1], tr_cids)
     ap_cb5, auc_cb5 = average_precision_score(y_va, p_cb5[va_m]), roc_auc_score(y_va, p_cb5[va_m])
@@ -400,7 +418,7 @@ def main():
     xgb6 = XGBClassifier(
         n_estimators=800, max_depth=6, learning_rate=0.02, subsample=0.80, colsample_bytree=0.55,
         min_child_weight=10, reg_alpha=1.5, reg_lambda=5.0, scale_pos_weight=3.5,
-        eval_metric="aucpr", early_stopping_rounds=50, random_state=42, n_jobs=-1, tree_method="hist",
+        eval_metric="aucpr", early_stopping_rounds=50, random_state=42 + SEED_OFFSET, n_jobs=-1, tree_method="hist",
     ).fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
     p_xgb6 = propagate_predictions_over_motifs(xgb6.predict_proba(X_tr_all)[:, 1], tr_cids)
     ap_xgb6, auc_xgb6 = average_precision_score(y_va, p_xgb6[va_m]), roc_auc_score(y_va, p_xgb6[va_m])
@@ -410,7 +428,7 @@ def main():
     xgb5 = XGBClassifier(
         n_estimators=800, max_depth=5, learning_rate=0.02, subsample=0.80, colsample_bytree=0.50,
         min_child_weight=8, reg_alpha=1.0, reg_lambda=4.0, scale_pos_weight=3.0,
-        eval_metric="aucpr", early_stopping_rounds=50, random_state=100, n_jobs=-1, tree_method="hist",
+        eval_metric="aucpr", early_stopping_rounds=50, random_state=100 + SEED_OFFSET, n_jobs=-1, tree_method="hist",
     ).fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
     p_xgb5 = propagate_predictions_over_motifs(xgb5.predict_proba(X_tr_all)[:, 1], tr_cids)
     ap_xgb5, auc_xgb5 = average_precision_score(y_va, p_xgb5[va_m]), roc_auc_score(y_va, p_xgb5[va_m])
@@ -420,7 +438,7 @@ def main():
     lgb31 = LGBMClassifier(
         n_estimators=400, learning_rate=0.02, num_leaves=31, max_depth=6, scale_pos_weight=3.0,
         subsample=0.80, colsample_bytree=0.50, min_child_samples=25, reg_alpha=1.5, reg_lambda=5.0,
-        random_state=42, n_jobs=-1, verbose=-1,
+        random_state=42 + SEED_OFFSET, n_jobs=-1, verbose=-1,
     ).fit(X_tr, y_tr)
     p_lgb31 = propagate_predictions_over_motifs(lgb31.predict_proba(X_tr_all)[:, 1], tr_cids)
     ap_lgb31, auc_lgb31 = average_precision_score(y_va, p_lgb31[va_m]), roc_auc_score(y_va, p_lgb31[va_m])
@@ -477,30 +495,30 @@ def main():
 
         f_cb6 = CatBoostClassifier(
             iterations=950, depth=6, learning_rate=0.03, auto_class_weights="SqrtBalanced",
-            l2_leaf_reg=5.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=42 + f, verbose=False,
+            l2_leaf_reg=5.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=42 + SEED_OFFSET + f, verbose=False,
         ).fit(X_f_tr, y_f_tr, eval_set=(X_f_va, y_f_va), verbose=False)
 
         f_cb7 = CatBoostClassifier(
             iterations=950, depth=7, learning_rate=0.025, auto_class_weights="SqrtBalanced",
-            l2_leaf_reg=6.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=77 + f, verbose=False,
+            l2_leaf_reg=6.0, eval_metric="PRAUC", early_stopping_rounds=60, random_seed=77 + SEED_OFFSET + f, verbose=False,
         ).fit(X_f_tr, y_f_tr, eval_set=(X_f_va, y_f_va), verbose=False)
 
         f_xgb6 = XGBClassifier(
             n_estimators=750, max_depth=6, learning_rate=0.02, subsample=0.80, colsample_bytree=0.55,
             min_child_weight=10, reg_alpha=1.5, reg_lambda=5.0, scale_pos_weight=3.5,
-            eval_metric="aucpr", early_stopping_rounds=50, random_state=42 + f, n_jobs=-1, tree_method="hist",
+            eval_metric="aucpr", early_stopping_rounds=50, random_state=42 + SEED_OFFSET + f, n_jobs=-1, tree_method="hist",
         ).fit(X_f_tr, y_f_tr, eval_set=[(X_f_va, y_f_va)], verbose=False)
 
         f_xgb5 = XGBClassifier(
             n_estimators=750, max_depth=5, learning_rate=0.02, subsample=0.80, colsample_bytree=0.50,
             min_child_weight=8, reg_alpha=1.0, reg_lambda=4.0, scale_pos_weight=3.0,
-            eval_metric="aucpr", early_stopping_rounds=50, random_state=100 + f, n_jobs=-1, tree_method="hist",
+            eval_metric="aucpr", early_stopping_rounds=50, random_state=100 + SEED_OFFSET + f, n_jobs=-1, tree_method="hist",
         ).fit(X_f_tr, y_f_tr, eval_set=[(X_f_va, y_f_va)], verbose=False)
 
         f_lgb = LGBMClassifier(
             n_estimators=380, learning_rate=0.02, num_leaves=31, max_depth=6, scale_pos_weight=3.0,
             subsample=0.80, colsample_bytree=0.50, min_child_samples=25, reg_alpha=1.5, reg_lambda=5.0,
-            random_state=42 + f, n_jobs=-1, verbose=-1,
+            random_state=42 + SEED_OFFSET + f, n_jobs=-1, verbose=-1,
         ).fit(X_f_tr, y_f_tr)
 
         oof_cb[f_va] = 0.60 * f_cb6.predict_proba(X_f_va)[:, 1] + 0.40 * f_cb7.predict_proba(X_f_va)[:, 1]
@@ -525,34 +543,45 @@ def main():
 
     # Full-train refit models on 100% of train-data
     print("  Refitting models on 100% of training data...")
+    # Self-training: add confident test rows from an earlier submission to the final refit only.
+    X_fit, y_fit = X_tr_all, y_all
+    if args.pseudo is not None:
+        ps = pd.read_csv(args.pseudo).set_index("TRANSACTION_HASH").reindex(list(te_hashes))["score"].to_numpy()
+        assert not np.isnan(ps).any(), "pseudo file does not cover every test hash"
+        r = ps.argsort().argsort() / (len(ps) - 1)
+        pos, neg = r >= 1 - args.pseudo_pos, r <= args.pseudo_neg
+        X_fit = pd.concat([X_tr_all, X_te_all[pos], X_te_all[neg]], ignore_index=True)
+        y_fit = np.concatenate([y_all, np.ones(pos.sum(), dtype=int), np.zeros(neg.sum(), dtype=int)])
+        print(f"  Pseudo-labels: +{int(pos.sum())} suspicious, +{int(neg.sum())} legitimate test rows in the final refit")
+
     cb6_full = CatBoostClassifier(
         iterations=max(int(cb6.get_best_iteration() * 1.12), 450), depth=6, learning_rate=0.03,
-        auto_class_weights="SqrtBalanced", l2_leaf_reg=5.0, random_seed=42, verbose=False,
-    ).fit(X_tr_all, y_all, verbose=False)
+        auto_class_weights="SqrtBalanced", l2_leaf_reg=5.0, random_seed=42 + SEED_OFFSET, verbose=False,
+    ).fit(X_fit, y_fit, verbose=False)
 
     cb7_full = CatBoostClassifier(
         iterations=max(int(cb7.get_best_iteration() * 1.12), 400), depth=7, learning_rate=0.025,
-        auto_class_weights="SqrtBalanced", l2_leaf_reg=6.0, random_seed=77, verbose=False,
-    ).fit(X_tr_all, y_all, verbose=False)
+        auto_class_weights="SqrtBalanced", l2_leaf_reg=6.0, random_seed=77 + SEED_OFFSET, verbose=False,
+    ).fit(X_fit, y_fit, verbose=False)
 
     cb5_full = CatBoostClassifier(
         iterations=max(int(cb5.get_best_iteration() * 1.12), 450), depth=5, learning_rate=0.03,
-        auto_class_weights="SqrtBalanced", l2_leaf_reg=4.0, random_seed=100, verbose=False,
-    ).fit(X_tr_all, y_all, verbose=False)
+        auto_class_weights="SqrtBalanced", l2_leaf_reg=4.0, random_seed=100 + SEED_OFFSET, verbose=False,
+    ).fit(X_fit, y_fit, verbose=False)
 
     xgb6_full = XGBClassifier(
         n_estimators=max(int(xgb6.best_iteration * 1.12), 300), max_depth=6, learning_rate=0.02,
         subsample=0.80, colsample_bytree=0.55, min_child_weight=10, reg_alpha=1.5, reg_lambda=5.0,
-        scale_pos_weight=3.5, eval_metric="aucpr", random_state=42, n_jobs=-1, tree_method="hist",
-    ).fit(X_tr_all, y_all, verbose=False)
+        scale_pos_weight=3.5, eval_metric="aucpr", random_state=42 + SEED_OFFSET, n_jobs=-1, tree_method="hist",
+    ).fit(X_fit, y_fit, verbose=False)
 
     xgb5_full = XGBClassifier(
         n_estimators=max(int(xgb5.best_iteration * 1.12), 300), max_depth=5, learning_rate=0.02,
         subsample=0.80, colsample_bytree=0.50, min_child_weight=8, reg_alpha=1.0, reg_lambda=4.0,
-        scale_pos_weight=3.0, eval_metric="aucpr", random_state=100, n_jobs=-1, tree_method="hist",
-    ).fit(X_tr_all, y_all, verbose=False)
+        scale_pos_weight=3.0, eval_metric="aucpr", random_state=100 + SEED_OFFSET, n_jobs=-1, tree_method="hist",
+    ).fit(X_fit, y_fit, verbose=False)
 
-    lgb31_full = copy.deepcopy(lgb31).fit(X_tr_all, y_all)
+    lgb31_full = copy.deepcopy(lgb31).fit(X_fit, y_fit)
 
     te_cb_full = 0.45 * cb6_full.predict_proba(X_te_all)[:, 1] + 0.30 * cb7_full.predict_proba(X_te_all)[:, 1] + 0.25 * cb5_full.predict_proba(X_te_all)[:, 1]
     te_xgb_full = 0.50 * xgb6_full.predict_proba(X_te_all)[:, 1] + 0.50 * xgb5_full.predict_proba(X_te_all)[:, 1]
