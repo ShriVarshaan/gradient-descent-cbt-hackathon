@@ -217,7 +217,6 @@ def build_flow_features(payments):
     result["sender_net_flow_usd"] = sender_in - sender_out
     result["receiver_net_flow_usd"] = receiver_in - receiver_out
 
-    # Time since sender last received funds
     incoming_history = df.sort_values(
         ["TO_ADDRESS", "TIMESTAMP"]
     )
@@ -267,7 +266,7 @@ def build_flow_features(payments):
     sender_in_24h = pd.Series(0.0, index=df.index)
     sender_out_24h = pd.Series(0.0, index=df.index)
 
-    for address, group in history.groupby(
+    for _, group in history.groupby(
         "FROM_ADDRESS"
     ):
         times = group["TIMESTAMP"].to_numpy()
@@ -468,7 +467,122 @@ def build_xrpl_features(transactions, transfers):
 
 
 # ============================================================
-# 8. COMBINE ALL FEATURES
+# 8. 7-DAY ACTIVITY, BURSTINESS AND ACCOUNT AGE
+# ============================================================
+
+def build_behavior_features(payments):
+    df = payments[
+        ["TRANSACTION_HASH", "FROM_ADDRESS",
+         "TO_ADDRESS", "TIMESTAMP", "usd_value"]
+    ].copy()
+
+    df["TIMESTAMP"] = pd.to_numeric(
+        df["TIMESTAMP"], errors="raise"
+    )
+    df["usd_value"] = pd.to_numeric(
+        df["usd_value"], errors="coerce"
+    ).fillna(0)
+
+    result = df[["TRANSACTION_HASH"]].copy()
+
+    for address_col, prefix in [
+        ("FROM_ADDRESS", "sender"),
+        ("TO_ADDRESS", "receiver")
+    ]:
+        activity = df.sort_values(
+            [address_col, "TIMESTAMP", "TRANSACTION_HASH"]
+        )
+
+        count_7d = pd.Series(0, index=df.index, dtype="int64")
+        volume_7d = pd.Series(0.0, index=df.index)
+        count_24h = pd.Series(0, index=df.index, dtype="int64")
+        count_1h = pd.Series(0, index=df.index, dtype="int64")
+        observed_age = pd.Series(-1.0, index=df.index)
+        seconds_since_last = pd.Series(-1.0, index=df.index)
+
+        for _, group in activity.groupby(
+            address_col, sort=False
+        ):
+            times = group["TIMESTAMP"].to_numpy(
+                dtype="float64"
+            )
+            amounts = group["usd_value"].to_numpy(
+                dtype="float64"
+            )
+
+            # Exclude transactions at the same timestamp
+            end = np.searchsorted(
+                times, times, side="left"
+            )
+
+            start_7d = np.searchsorted(
+                times, times - 7 * 86400, side="left"
+            )
+            start_24h = np.searchsorted(
+                times, times - 86400, side="left"
+            )
+            start_1h = np.searchsorted(
+                times, times - 3600, side="left"
+            )
+
+            cumulative = np.concatenate(
+                ([0.0], np.cumsum(amounts))
+            )
+
+            count_7d.loc[group.index] = end - start_7d
+            volume_7d.loc[group.index] = (
+                cumulative[end] - cumulative[start_7d]
+            )
+
+            count_24h.loc[group.index] = end - start_24h
+            count_1h.loc[group.index] = end - start_1h
+
+            has_history = end > 0
+
+            ages = np.full(len(times), -1.0)
+            ages[has_history] = (
+                times[has_history] - times[0]
+            )
+            observed_age.loc[group.index] = ages
+
+            gaps = np.full(len(times), -1.0)
+            gaps[has_history] = (
+                times[has_history]
+                - times[end[has_history] - 1]
+            )
+            seconds_since_last.loc[group.index] = gaps
+
+        result[f"{prefix}_tx_count_7d"] = count_7d
+        result[f"{prefix}_usd_7d"] = volume_7d
+        result[f"{prefix}_observed_age_seconds"] = observed_age
+        result[f"{prefix}_seconds_since_last_tx"] = (
+            seconds_since_last
+        )
+
+        # Activity compared with historical weekly average
+        result[f"{prefix}_burst_ratio_24h"] = (
+            (count_24h + 1)
+            / (count_7d / 7.0 + 1)
+        )
+
+        result[f"{prefix}_burst_ratio_1h"] = (
+            (count_1h + 1)
+            / (count_7d / 168.0 + 1)
+        )
+
+        result[f"{prefix}_activity_concentration_24h"] = (
+            count_24h / count_7d.clip(lower=1)
+        )
+
+        result[f"{prefix}_activity_concentration_1h"] = (
+            count_1h / count_7d.clip(lower=1)
+        )
+
+    return result
+
+
+# ============================================================
+# 9. COMBINE ALL FEATURES
 # ============================================================
 
 def build_features(directory):
@@ -501,6 +615,8 @@ def build_features(directory):
         transactions, transfers
     )
 
+    behavior_features = build_behavior_features(payments)
+
     features = leg_features.merge(
         payment_features,
         on="TRANSACTION_HASH",
@@ -513,7 +629,8 @@ def build_features(directory):
         time_features,
         flow_features,
         graph_features,
-        xrpl_features
+        xrpl_features,
+        behavior_features
     ]:
         features = features.merge(
             additional,
@@ -533,7 +650,7 @@ def build_features(directory):
 
 
 # ============================================================
-# 9. RUN AND EXPORT
+# 10. RUN AND EXPORT
 # ============================================================
 
 if __name__ == "__main__":
@@ -552,4 +669,16 @@ if __name__ == "__main__":
             features["usd_value"].isna().sum()
         )
         print("Saved to:", output_path)
-        print(features.head().to_string(index=False))
+
+        numeric = features.drop(
+            columns=["TRANSACTION_HASH"]
+        )
+
+        print(
+            "Missing feature values:",
+            int(numeric.isna().sum().sum())
+        )
+        print(
+            "Infinite feature values:",
+            int(np.isinf(numeric.to_numpy(dtype=float)).sum())
+        )
