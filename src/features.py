@@ -1,9 +1,22 @@
-"""Step 2 basic features: one row per transaction, built from the Step 1 tables."""
+"""Features: one row per transaction, built from the Step 1 tables.
+
+Basic features come from our Step 1 tables. FX features (leg, USD payment and
+account behaviour) come from feature/feature-engineering and are merged on TRANSACTION_HASH.
+"""
+import sys
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 
+# Import payments.py from the project root
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from payments import project
 from prepare import add_usd, join_blocks, parse_payments
 
-FEATURES = [
+BASIC_FEATURES = [
     "n_legs",
     "total_usd",
     "first_leg_usd",
@@ -16,8 +29,153 @@ FEATURES = [
     "hour",
 ]
 
+FX_FEATURES = [
+    "leg_count",
+    "distinct_assets",
+    "distinct_leg_senders",
+    "distinct_leg_receivers",
+    "max_leg_amount",
+    "min_leg_amount",
+    "mean_leg_amount",
+    "total_leg_amount",
+    "is_cross_currency",
+    "leg_amount_ratio",
+    "usd_value",
+    "log_usd_value",
+    "is_large_payment",
+    "sender_tx_count",
+    "sender_total_usd",
+    "sender_unique_receivers",
+    "receiver_tx_count",
+    "receiver_total_usd",
+    "receiver_unique_senders",
+    "sender_avg_usd",
+    "receiver_avg_usd",
+]
 
-def build_features(tables):
+FEATURES = BASIC_FEATURES + FX_FEATURES
+
+
+
+# -----------------------------------------
+# 1. TRANSACTION-LEVEL FEATURES
+# -----------------------------------------
+
+def build_leg_features(transfers):
+    df = transfers.copy()
+
+    # Identify assets by issuer + currency
+    df["asset_id"] = (
+        df["TOKEN_ADDRESS"].fillna("XRP").astype(str)
+        + ":"
+        + df["SYMBOL"].fillna("XRP").astype(str)
+    )
+
+    df["amount"] = pd.to_numeric(
+        df["VALUE"], errors="coerce"
+    )
+
+    features = df.groupby("TRANSACTION_HASH").agg(
+        leg_count=("TRANSACTION_HASH", "size"),
+        distinct_assets=("asset_id", "nunique"),
+        distinct_leg_senders=("FROM_ADDRESS", "nunique"),
+        distinct_leg_receivers=("TO_ADDRESS", "nunique"),
+        max_leg_amount=("amount", "max"),
+        min_leg_amount=("amount", "min"),
+        mean_leg_amount=("amount", "mean"),
+        total_leg_amount=("amount", "sum"),
+    ).reset_index()
+
+    features["is_cross_currency"] = (
+        features["distinct_assets"] > 1
+    ).astype(int)
+
+    features["leg_amount_ratio"] = (
+        features["max_leg_amount"]
+        / features["min_leg_amount"].clip(lower=1e-9)
+    )
+
+    return features
+
+
+# -----------------------------------------
+# 2. USD PAYMENT FEATURES
+# -----------------------------------------
+
+def build_payment_features(payments):
+    features = payments[[
+        "TRANSACTION_HASH", "usd_value"
+    ]].copy()
+
+    features["log_usd_value"] = np.log1p(
+        features["usd_value"].clip(lower=0)
+    )
+
+    features["is_large_payment"] = (
+        features["usd_value"] >= 10000
+    ).astype(int)
+
+    return features
+
+
+# -----------------------------------------
+# 3. ACCOUNT BEHAVIOUR FEATURES
+# -----------------------------------------
+
+def build_account_features(payments):
+
+    # Outgoing account activity
+    outgoing = payments.groupby("FROM_ADDRESS").agg(
+        sender_tx_count=("TRANSACTION_HASH", "count"),
+        sender_total_usd=("usd_value", "sum"),
+        sender_unique_receivers=("TO_ADDRESS", "nunique"),
+    )
+
+    # Incoming account activity
+    incoming = payments.groupby("TO_ADDRESS").agg(
+        receiver_tx_count=("TRANSACTION_HASH", "count"),
+        receiver_total_usd=("usd_value", "sum"),
+        receiver_unique_senders=("FROM_ADDRESS", "nunique"),
+    )
+
+    features = payments[[
+        "TRANSACTION_HASH",
+        "FROM_ADDRESS",
+        "TO_ADDRESS"
+    ]].copy()
+
+    features = features.join(
+        outgoing, on="FROM_ADDRESS"
+    )
+
+    features = features.join(
+        incoming, on="TO_ADDRESS"
+    )
+
+    features["sender_avg_usd"] = (
+        features["sender_total_usd"]
+        / features["sender_tx_count"].clip(lower=1)
+    )
+
+    features["receiver_avg_usd"] = (
+        features["receiver_total_usd"]
+        / features["receiver_tx_count"].clip(lower=1)
+    )
+
+    return features.drop(
+        columns=["FROM_ADDRESS", "TO_ADDRESS"]
+    )
+
+
+# -----------------------------------------
+# 4. COMBINE ALL FEATURES
+# -----------------------------------------
+
+# -----------------------------------------
+# 5. BASIC AND COMBINED BUILDERS
+# -----------------------------------------
+
+def build_basic_features(tables):
     tx = join_blocks(tables["transactions"], tables["blocks"])
     parsed = parse_payments(tables["transactions"])
     legs = add_usd(tables["transfers"], tables["market_rates"])
@@ -40,3 +198,31 @@ def build_features(tables):
     out["has_send_max"] = out["has_send_max"].astype(int)
     out["has_paths"] = out["has_paths"].astype(int)
     return out.drop(columns=["destination", "delivered_currency", "delivered_issuer"])
+
+
+def build_fx_features(tables):
+    rates = {
+        (int(r["TIMESTAMP"]), r["ASSET"]): int(r["PRICE_MICRO_USD"])
+        for r in tables["market_rates"].to_dict("records")
+    }
+    payments = pd.DataFrame(project(tables["transactions"].to_dict("records"), rates))
+    payments["usd_value"] = pd.to_numeric(payments["VALUE"], errors="coerce")
+
+    leg_features = build_leg_features(tables["transfers"])
+    payment_features = build_payment_features(payments)
+    account_features = build_account_features(payments)
+
+    features = leg_features.merge(
+        payment_features, on="TRANSACTION_HASH", how="left", validate="one_to_one"
+    )
+    features = features.merge(
+        account_features, on="TRANSACTION_HASH", how="left", validate="one_to_one"
+    )
+    assert features["TRANSACTION_HASH"].is_unique
+    return features
+
+
+def build_features(tables):
+    basic = build_basic_features(tables)
+    fx = build_fx_features(tables)
+    return basic.merge(fx, on="TRANSACTION_HASH", how="left", validate="one_to_one")
