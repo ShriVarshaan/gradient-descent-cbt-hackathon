@@ -1,6 +1,6 @@
 """Past-only account, velocity, flow, XRPL, behaviour and laundering-pattern features.
 
-Ported from feature/feature-engineering (e925529). Every account feature uses only
+Ported from feature/feature-engineering (e925529, 7519be8). Every account feature uses only
 payments strictly before the current timestamp, so ties at the same second are
 treated the same regardless of row order.
 """
@@ -96,6 +96,35 @@ HISTORY_FEATURES = [
     "amount_preserving_3hop_90",
     "rapid_amount_preserving_2hop_1h",
 ]
+
+# Aggregation and neighbourhood columns from feature/feature-engineering (7519be8).
+AGG_TOPO_FEATURES = [
+    "aggregate_incoming_sum_1h",
+    "aggregate_incoming_count_1h",
+    "aggregate_incoming_unique_senders_1h",
+    "aggregate_incoming_match_1h",
+    "aggregate_incoming_match_24h",
+    "best_two_incoming_match_24h",
+    "best_three_incoming_match_24h",
+    "aggregate_match_sender_count_1h",
+    "aggregate_incoming_span_seconds_1h",
+    "incoming_to_outgoing_volume_ratio_24h",
+    "outgoing_to_incoming_volume_ratio_24h",
+    "aggregate_outgoing_count_1h",
+    "shared_sender_neighbors_24h",
+    "shared_receiver_neighbors_24h",
+    "shared_neighbor_count_24h",
+    "sender_two_hop_reach_24h",
+    "receiver_two_hop_reach_24h",
+    "sender_common_destinations_24h",
+    "receiver_common_sources_24h",
+    "pair_reverse_count_24h",
+    "sender_neighbor_activity_1h",
+    "receiver_neighbor_activity_1h",
+    "sender_neighbor_burst_1h",
+    "receiver_neighbor_burst_1h",
+]
+HISTORY_FEATURES += AGG_TOPO_FEATURES
 
 def build_historical_account_graph_features(payments):
     df = payments[
@@ -1253,6 +1282,555 @@ def build_advanced_graph_features(payments):
         start = end
 
     result = pd.DataFrame(output)
+    result.insert(
+        0,
+        "TRANSACTION_HASH",
+        df["TRANSACTION_HASH"].values
+    )
+
+    return result
+
+
+def build_aggregate_flow_features(payments):
+    from collections import defaultdict, deque
+    from itertools import combinations
+
+    HOUR = 3600
+    DAY = 86400
+    EPS = 1e-9
+
+    feature_names = [
+        "aggregate_incoming_sum_1h",
+        "aggregate_incoming_count_1h",
+        "aggregate_incoming_unique_senders_1h",
+        "aggregate_incoming_match_1h",
+        "aggregate_incoming_match_24h",
+        "best_two_incoming_match_24h",
+        "best_three_incoming_match_24h",
+        "aggregate_match_sender_count_1h",
+        "aggregate_incoming_span_seconds_1h",
+        "incoming_to_outgoing_volume_ratio_24h",
+        "outgoing_to_incoming_volume_ratio_24h",
+        "aggregate_outgoing_count_1h",
+    ]
+
+    df = payments[
+        [
+            "TRANSACTION_HASH",
+            "TIMESTAMP",
+            "FROM_ADDRESS",
+            "TO_ADDRESS",
+            "usd_value",
+        ]
+    ].copy()
+
+    df["TIMESTAMP"] = pd.to_numeric(
+        df["TIMESTAMP"], errors="raise"
+    )
+
+    df["usd_value"] = pd.to_numeric(
+        df["usd_value"], errors="coerce"
+    ).fillna(0.0)
+
+    df = df.sort_values(
+        ["TIMESTAMP", "TRANSACTION_HASH"],
+        kind="mergesort"
+    ).reset_index(drop=True)
+
+    n = len(df)
+
+    output = {
+        name: np.zeros(n, dtype=float)
+        for name in feature_names
+    }
+
+    incoming = defaultdict(deque)
+    outgoing = defaultdict(deque)
+
+    def prune(history, current_time):
+        cutoff = current_time - DAY
+
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
+    def similarity(a, b):
+        a = max(float(a), 0.0)
+        b = max(float(b), 0.0)
+
+        if a <= EPS or b <= EPS:
+            return 0.0
+
+        return min(a, b) / max(a, b)
+
+    def best_combination_match(amounts, target, size):
+        if len(amounts) < size or target <= EPS:
+            return 0.0
+
+        # Bound the combinatorial search.
+        # Use the most recent 30 incoming payments.
+        recent = amounts[-30:]
+
+        best = 0.0
+
+        for group in combinations(recent, size):
+            score = similarity(sum(group), target)
+
+            if score > best:
+                best = score
+
+            if best >= 0.999999:
+                break
+
+        return best
+
+    records = df.to_dict("records")
+
+    start = 0
+
+    while start < n:
+        current_time = records[start]["TIMESTAMP"]
+
+        end = start + 1
+
+        while (
+            end < n
+            and records[end]["TIMESTAMP"] == current_time
+        ):
+            end += 1
+
+        pending = []
+
+        # Evaluate the entire timestamp batch before
+        # adding any transactions from that timestamp.
+        for k in range(start, end):
+            row = records[k]
+
+            sender = row["FROM_ADDRESS"]
+            receiver = row["TO_ADDRESS"]
+            amount = max(float(row["usd_value"]), 0.0)
+
+            sender_in = incoming[sender]
+            sender_out = outgoing[sender]
+
+            prune(sender_in, current_time)
+            prune(sender_out, current_time)
+
+            in_24h = list(sender_in)
+            out_24h = list(sender_out)
+
+            in_1h = [
+                record for record in in_24h
+                if current_time - record[0] <= HOUR
+            ]
+
+            out_1h = [
+                record for record in out_24h
+                if current_time - record[0] <= HOUR
+            ]
+
+            # Records are:
+            # (timestamp, counterparty, amount)
+
+            in_sum_1h = sum(x[2] for x in in_1h)
+            in_sum_24h = sum(x[2] for x in in_24h)
+
+            out_sum_24h = sum(x[2] for x in out_24h)
+
+            output["aggregate_incoming_sum_1h"][k] = (
+                in_sum_1h
+            )
+
+            output["aggregate_incoming_count_1h"][k] = (
+                len(in_1h)
+            )
+
+            output[
+                "aggregate_incoming_unique_senders_1h"
+            ][k] = len({
+                x[1] for x in in_1h
+            })
+
+            output["aggregate_incoming_match_1h"][k] = (
+                similarity(in_sum_1h, amount)
+            )
+
+            output["aggregate_incoming_match_24h"][k] = (
+                similarity(in_sum_24h, amount)
+            )
+
+            # Look for 2 or 3 incoming payments whose
+            # combined value matches this outgoing payment.
+            incoming_amounts = [
+                x[2] for x in in_24h
+            ]
+
+            output[
+                "best_two_incoming_match_24h"
+            ][k] = best_combination_match(
+                incoming_amounts,
+                amount,
+                2
+            )
+
+            output[
+                "best_three_incoming_match_24h"
+            ][k] = best_combination_match(
+                incoming_amounts,
+                amount,
+                3
+            )
+
+            # Number of distinct incoming counterparties
+            # contributing to recent accumulated funds.
+            output[
+                "aggregate_match_sender_count_1h"
+            ][k] = (
+                len({x[1] for x in in_1h})
+                if similarity(in_sum_1h, amount) >= 0.90
+                else 0
+            )
+
+            if len(in_1h) >= 2:
+                output[
+                    "aggregate_incoming_span_seconds_1h"
+                ][k] = (
+                    in_1h[-1][0] - in_1h[0][0]
+                )
+
+            output[
+                "incoming_to_outgoing_volume_ratio_24h"
+            ][k] = (
+                in_sum_24h / (out_sum_24h + amount + 1.0)
+            )
+
+            output[
+                "outgoing_to_incoming_volume_ratio_24h"
+            ][k] = (
+                (out_sum_24h + amount)
+                / (in_sum_24h + 1.0)
+            )
+
+            output[
+                "aggregate_outgoing_count_1h"
+            ][k] = len(out_1h)
+
+            pending.append(
+                (
+                    current_time,
+                    sender,
+                    receiver,
+                    amount,
+                )
+            )
+
+        for timestamp, sender, receiver, amount in pending:
+            outgoing[sender].append(
+                (timestamp, receiver, amount)
+            )
+            incoming[receiver].append(
+                (timestamp, sender, amount)
+            )
+
+        start = end
+
+    result = pd.DataFrame(output)
+
+    result.insert(
+        0,
+        "TRANSACTION_HASH",
+        df["TRANSACTION_HASH"].values
+    )
+
+    return result
+
+def build_graph_topology_features(payments):
+    from collections import defaultdict, deque
+
+    HOUR = 3600
+    DAY = 86400
+
+    feature_names = [
+        "shared_sender_neighbors_24h",
+        "shared_receiver_neighbors_24h",
+        "shared_neighbor_count_24h",
+        "sender_two_hop_reach_24h",
+        "receiver_two_hop_reach_24h",
+        "sender_common_destinations_24h",
+        "receiver_common_sources_24h",
+        "pair_reverse_count_24h",
+        "sender_neighbor_activity_1h",
+        "receiver_neighbor_activity_1h",
+        "sender_neighbor_burst_1h",
+        "receiver_neighbor_burst_1h",
+    ]
+
+    df = payments[
+        [
+            "TRANSACTION_HASH",
+            "TIMESTAMP",
+            "FROM_ADDRESS",
+            "TO_ADDRESS",
+        ]
+    ].copy()
+
+    df["TIMESTAMP"] = pd.to_numeric(
+        df["TIMESTAMP"], errors="raise"
+    )
+
+    df = df.sort_values(
+        ["TIMESTAMP", "TRANSACTION_HASH"],
+        kind="mergesort"
+    ).reset_index(drop=True)
+
+    n = len(df)
+
+    output = {
+        name: np.zeros(n, dtype=float)
+        for name in feature_names
+    }
+
+    # Historical outgoing and incoming edges.
+    # Records contain (timestamp, counterparty).
+    outgoing = defaultdict(deque)
+    incoming = defaultdict(deque)
+
+    def prune(history, now, window=DAY):
+        cutoff = now - window
+
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
+    def recent(history, now, window):
+        prune(history, now)
+        return [
+            item
+            for item in history
+            if now - item[0] <= window
+        ]
+
+    def outgoing_neighbors(account, now):
+        return {
+            item[1]
+            for item in recent(outgoing[account], now, DAY)
+        }
+
+    def incoming_neighbors(account, now):
+        return {
+            item[1]
+            for item in recent(incoming[account], now, DAY)
+        }
+
+    records = df.to_dict("records")
+
+    start = 0
+
+    while start < n:
+        now = records[start]["TIMESTAMP"]
+
+        end = start + 1
+
+        while (
+            end < n
+            and records[end]["TIMESTAMP"] == now
+        ):
+            end += 1
+
+        pending = []
+
+        for k in range(start, end):
+            row = records[k]
+
+            sender = row["FROM_ADDRESS"]
+            receiver = row["TO_ADDRESS"]
+
+            sender_out = recent(outgoing[sender], now, DAY)
+            sender_in = recent(incoming[sender], now, DAY)
+
+            receiver_out = recent(outgoing[receiver], now, DAY)
+            receiver_in = recent(incoming[receiver], now, DAY)
+
+            sender_destinations = {
+                x[1] for x in sender_out
+            }
+
+            sender_sources = {
+                x[1] for x in sender_in
+            }
+
+            receiver_destinations = {
+                x[1] for x in receiver_out
+            }
+
+            receiver_sources = {
+                x[1] for x in receiver_in
+            }
+
+            # ----------------------------------------
+            # 1. Shared neighbourhood structure
+            # ----------------------------------------
+
+            shared_senders = (
+                sender_sources & receiver_sources
+            )
+
+            shared_receivers = (
+                sender_destinations
+                & receiver_destinations
+            )
+
+            output[
+                "shared_sender_neighbors_24h"
+            ][k] = len(shared_senders)
+
+            output[
+                "shared_receiver_neighbors_24h"
+            ][k] = len(shared_receivers)
+
+            output[
+                "shared_neighbor_count_24h"
+            ][k] = (
+                len(shared_senders)
+                + len(shared_receivers)
+            )
+
+            # ----------------------------------------
+            # 2. Two-hop network reach
+            # ----------------------------------------
+
+            sender_two_hop = set()
+
+            for neighbor in sender_destinations:
+                sender_two_hop.update(
+                    outgoing_neighbors(neighbor, now)
+                )
+
+            receiver_two_hop = set()
+
+            for neighbor in receiver_sources:
+                receiver_two_hop.update(
+                    incoming_neighbors(neighbor, now)
+                )
+
+            sender_two_hop.discard(sender)
+            receiver_two_hop.discard(receiver)
+
+            output[
+                "sender_two_hop_reach_24h"
+            ][k] = len(sender_two_hop)
+
+            output[
+                "receiver_two_hop_reach_24h"
+            ][k] = len(receiver_two_hop)
+
+            # ----------------------------------------
+            # 3. Shared destinations / sources
+            # ----------------------------------------
+
+            common_destinations = 0
+
+            for source in sender_sources:
+                source_destinations = (
+                    outgoing_neighbors(source, now)
+                )
+
+                common_destinations += len(
+                    source_destinations
+                    & sender_destinations
+                )
+
+            common_sources = 0
+
+            for destination in receiver_destinations:
+                destination_sources = (
+                    incoming_neighbors(destination, now)
+                )
+
+                common_sources += len(
+                    destination_sources
+                    & receiver_sources
+                )
+
+            output[
+                "sender_common_destinations_24h"
+            ][k] = common_destinations
+
+            output[
+                "receiver_common_sources_24h"
+            ][k] = common_sources
+
+            # ----------------------------------------
+            # 4. Reverse transactions
+            # ----------------------------------------
+
+            output["pair_reverse_count_24h"][k] = sum(
+                1
+                for previous in receiver_out
+                if previous[1] == sender
+            )
+
+            # ----------------------------------------
+            # 5. Neighbour activity
+            # ----------------------------------------
+
+            sender_neighbor_activity = 0
+            receiver_neighbor_activity = 0
+
+            sender_active_neighbors = 0
+            receiver_active_neighbors = 0
+
+            for neighbor in sender_destinations:
+                activity = len(
+                    recent(outgoing[neighbor], now, HOUR)
+                )
+
+                sender_neighbor_activity += activity
+
+                if activity >= 2:
+                    sender_active_neighbors += 1
+
+            for neighbor in receiver_sources:
+                activity = len(
+                    recent(incoming[neighbor], now, HOUR)
+                )
+
+                receiver_neighbor_activity += activity
+
+                if activity >= 2:
+                    receiver_active_neighbors += 1
+
+            output[
+                "sender_neighbor_activity_1h"
+            ][k] = sender_neighbor_activity
+
+            output[
+                "receiver_neighbor_activity_1h"
+            ][k] = receiver_neighbor_activity
+
+            output[
+                "sender_neighbor_burst_1h"
+            ][k] = sender_active_neighbors
+
+            output[
+                "receiver_neighbor_burst_1h"
+            ][k] = receiver_active_neighbors
+
+            pending.append((now, sender, receiver))
+
+        # Insert transactions only after processing
+        # every transaction at the same timestamp.
+        for timestamp, sender, receiver in pending:
+            outgoing[sender].append(
+                (timestamp, receiver)
+            )
+
+            incoming[receiver].append(
+                (timestamp, sender)
+            )
+
+        start = end
+
+    result = pd.DataFrame(output)
+
     result.insert(
         0,
         "TRANSACTION_HASH",

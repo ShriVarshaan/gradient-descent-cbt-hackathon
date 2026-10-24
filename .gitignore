@@ -27,3 +27,6 @@ MEMBER_A_GUIDE.md
 
 # Generated model output
 submission.csv
+
+# CatBoost training logs
+catboost_info/

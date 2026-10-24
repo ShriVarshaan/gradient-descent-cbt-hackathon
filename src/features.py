@@ -16,12 +16,16 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from component_features import COMPONENT_FEATURES, build_component_features
+from full_window_features import FULL_WINDOW_FEATURES, build_full_window_features
 from graph_features import GRAPH_FEATURES, build_graph_features
 from history_features import (
     HISTORY_FEATURES,
     build_advanced_graph_features,
+    build_aggregate_flow_features,
     build_behavior_features,
     build_flow_features,
+    build_graph_topology_features,
     build_historical_account_graph_features,
     build_laundering_pattern_features,
     build_time_features,
@@ -68,7 +72,8 @@ FX_FEATURES = [
     "receiver_avg_usd",
 ]
 
-FEATURES = BASIC_FEATURES + FX_FEATURES + HISTORY_FEATURES + GRAPH_FEATURES + MOTIF_FEATURES + RARE_FEATURES
+FEATURES = (BASIC_FEATURES + FX_FEATURES + HISTORY_FEATURES + GRAPH_FEATURES + MOTIF_FEATURES
+            + RARE_FEATURES + COMPONENT_FEATURES + FULL_WINDOW_FEATURES)
 
 
 
@@ -188,6 +193,9 @@ def build_fx_features(tables):
         build_behavior_features(payments),
         build_laundering_pattern_features(payments),
         build_advanced_graph_features(payments),
+        build_aggregate_flow_features(payments),
+        build_graph_topology_features(payments),
+        build_full_window_features(payments),
     ]:
         features = features.merge(
             additional, on="TRANSACTION_HASH", how="left", validate="one_to_one"
@@ -203,4 +211,6 @@ def build_features(tables):
     motif = build_motif_features(tables)
     out = basic.merge(fx, on="TRANSACTION_HASH", how="left", validate="one_to_one")
     out = out.merge(graph, on="TRANSACTION_HASH", how="left", validate="one_to_one")
-    return out.merge(motif, on="TRANSACTION_HASH", how="left", validate="one_to_one")
+    out = out.merge(motif, on="TRANSACTION_HASH", how="left", validate="one_to_one")
+    component = build_component_features(tables)
+    return out.merge(component, on="TRANSACTION_HASH", how="left", validate="one_to_one")
