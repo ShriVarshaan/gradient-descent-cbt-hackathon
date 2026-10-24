@@ -37,8 +37,12 @@ class SAGE(torch.nn.Module):
         return self.out(h + self.skip(x))
 
 
-def load(path, device):
-    return torch.load(path, weights_only=False)["data"].to(device)
+def load(path, device, no_graph=False):
+    data = torch.load(path, weights_only=False)["data"].to(device)
+    if no_graph:                                # ablation: same model, every node sees only itself
+        for store in data.edge_stores:
+            store.edge_index = store.edge_index[:, :0]
+    return data
 
 
 def scores(model, data):
@@ -93,10 +97,11 @@ def main():
     p.add_argument("--predict", help="graph .pt to score, e.g. graphs/test.pt")
     p.add_argument("--out", default="predictions.csv")
     p.add_argument("--history", help="optional CSV of per-epoch loss and val AP for every run")
+    p.add_argument("--no-graph", action="store_true", help="ablation: drop all edges (an MLP on tx features)")
     args = p.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    data = load(args.train_graph, device)
+    data = load(args.train_graph, device, args.no_graph)
     y = data["tx"].y
     print(f"device={device}  train pos={y[data['tx'].train_mask].sum():.0f}  val pos={y[data['tx'].val_mask].sum():.0f}"
           f"  val AP floor={y[data['tx'].val_mask].mean():.4f}")
@@ -121,7 +126,7 @@ def main():
 
     if args.predict:
         best_pw = summary["mean"].idxmax()
-        test = load(args.predict, device)
+        test = load(args.predict, device, args.no_graph)
         p = torch.stack([torch.sigmoid(scores(m, test)) for m in models[best_pw]]).mean(0).cpu().numpy()
         pd.DataFrame({"TRANSACTION_HASH": test["tx"].hash, "score": p}).to_csv(args.out, index=False)
         print(f"\nwrote {args.out}: {len(p)} rows, averaged {len(models[best_pw])} runs with pos_weight={best_pw:g}")
