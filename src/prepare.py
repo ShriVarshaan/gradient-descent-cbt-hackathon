@@ -7,13 +7,15 @@ import pandas as pd
 
 def load_tables(data_dir):
     d = Path(data_dir)
-    return {
+    tables = {
         "transactions": pd.read_parquet(d / "transactions.parquet"),
         "transfers": pd.read_parquet(d / "transfers.parquet"),
         "blocks": pd.read_parquet(d / "blocks.parquet"),
         "market_rates": pd.read_csv(d / "market_rates.csv"),
-        "labels": pd.read_csv(d / "labels.csv"),
     }
+    if (d / "labels.csv").exists():  # the test download has no labels
+        tables["labels"] = pd.read_csv(d / "labels.csv")
+    return tables
 
 
 def parse_payments(tx):
