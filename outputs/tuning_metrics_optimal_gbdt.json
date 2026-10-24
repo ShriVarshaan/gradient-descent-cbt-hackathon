@@ -1,0 +1,15 @@
+{
+  "n_features": 464,
+  "5fold_oof_raw_ap": 0.6487562425008135,
+  "5fold_oof_prop_ap": 0.6177519101102228,
+  "5fold_oof_prop_auc": 0.9457238651269257,
+  "difficulty_breakdown": {
+    "easy_medrank": 510,
+    "easy_top1250": 0.91,
+    "medium_medrank": 5095,
+    "medium_top1250": 0.0711,
+    "hard_medrank": 4612,
+    "hard_top1250": 0.2311
+  },
+  "elapsed_seconds": 271.2
+}

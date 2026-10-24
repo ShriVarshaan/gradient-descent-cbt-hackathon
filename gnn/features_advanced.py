@@ -541,13 +541,17 @@ def extract_all_domain_features(split_dir: Path, tx_hash_order: list[str] | None
         "adv_v_auth_eph": auth_eph[v],
     }, dtype=np.float32)
 
-    # 5. Directed Causal Chains (standard & amount-conserving for medium-difficulty motifs)
+    # 5. Directed Causal Chains (standard & amount-conserving for short and medium difficulty motifs)
     chain_cols = {}
     for w in [180, 300, 600]:
         chain_cols.update(_compute_causal_chains(u, v, ts, is_eph_1h, w, n_acc, f"adv_echain{w}"))
+    for w in [1200, 2400, 4800]:
+        chain_cols.update(_compute_causal_chains(u, v, ts, is_eph_6h, w, n_acc, f"adv_echain{w}"))
     chain_cols.update(_compute_causal_chains(u, v, ts, None, 300, n_acc, "adv_achain300"))
     chain_cols.update(_compute_amount_causal_chains(u, v, ts, uf_log, ul_log, 600, 0.25, n_acc, "adv_acchain600"))
     chain_cols.update(_compute_amount_causal_chains(u, v, ts, uf_log, ul_log, 2400, 0.28, n_acc, "adv_acchain2400"))
+    chain_cols.update(_compute_amount_causal_chains(u, v, ts, uf_log, ul_log, 4800, 0.35, n_acc, "adv_acchain4800"))
+    chain_cols.update(_compute_amount_causal_chains(u, v, ts, uf_log, ul_log, 9600, 0.40, n_acc, "adv_acchain9600"))
     chain_df = pd.DataFrame(chain_cols, dtype=np.float32)
 
     # 6. Multi-Scale Ephemeral & All-Pair Temporal Connected Component (TCC) Motif Invariants
@@ -555,16 +559,29 @@ def extract_all_domain_features(split_dir: Path, tx_hash_order: list[str] | None
     f_e240, cid_e240, s_e240, d_e240 = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, is_eph_1h, 240, 10.0, "adv_etcc240")
     f_e360, cid_e360, s_e360, d_e360 = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, is_eph_1h, 360, 10.0, "adv_etcc360")
     f_e600, cid_e600, _, _ = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, is_eph_1h, 600, 0.35, "adv_etcc600du")
+    f_e1200, cid_e1200, _, _ = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, is_eph_6h, 1200, 10.0, "adv_etcc1200")
+    f_e2400, cid_e2400, _, _ = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, is_eph_6h, 2400, 10.0, "adv_etcc2400")
+    f_e4800, cid_e4800, _, _ = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, is_eph_6h, 4800, 10.0, "adv_etcc4800")
+    f_e9600du, cid_e9600, _, _ = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, is_eph_6h, 9600, 0.40, "adv_etcc9600du")
     f_a120, cid_a120, _, _ = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, None, 120, 10.0, "adv_atcc120")
     f_a300, cid_a300, _, _ = _extract_tcc_scale(u, v, ts, uf_raw, uf_log, burst_10m, n_legs, None, 300, 0.30, "adv_atcc300du")
 
-    out_df = pd.concat([base_adv, chain_df, f_e120, f_e240, f_e360, f_e600, f_a120, f_a300], axis=1)
+    out_df = pd.concat([
+        base_adv, chain_df,
+        f_e120, f_e240, f_e360, f_e600,
+        f_e1200, f_e2400, f_e4800, f_e9600du,
+        f_a120, f_a300
+    ], axis=1)
     cids = {
         "is_eph_1h": is_eph_1h,
+        "is_eph_6h": is_eph_6h,
         "cid_e120": cid_e120,
         "cid_e240": cid_e240,
         "cid_e360": cid_e360,
         "cid_e600": cid_e600,
+        "cid_e1200": cid_e1200,
+        "cid_e2400": cid_e2400,
+        "cid_e4800": cid_e4800,
         "etcc_edges": (s_e360, d_e360),
     }
     return out_df, cids
