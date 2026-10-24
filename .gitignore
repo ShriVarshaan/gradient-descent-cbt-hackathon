@@ -2,3 +2,34 @@ train-data/
 graphs/
 attempts/
 predictions.csv
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Organiser data: never commit
+data/*
+!data/.gitkeep
+
+# OS / logs
+*.log
+.DS_Store
+
+# Personal AI-tool config (never committed)
+.claude/
+.cursor/
+CLAUDE.md
+
+# Personal notes: local only, never committed
+PLAN_A.md
+PLAN.md
+TODO.md
+RUN_TESTS_GUIDE.md
+MEMBER_A_GUIDE.md
+
+# Generated outputs
+submission*.csv
+oof/
+code.zip
