@@ -1,7 +1,8 @@
 """Features: one row per transaction, built from the Step 1 tables.
 
 Basic features come from our Step 1 tables. FX features (leg, USD payment and
-account behaviour) come from feature/feature-engineering and are merged on TRANSACTION_HASH.
+account behaviour) come from feature/feature-engineering. Graph-context features come
+from the gnn branch (see graph_features.py). All are merged on TRANSACTION_HASH.
 """
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from graph_features import GRAPH_FEATURES, build_graph_features
 from payments import project
 from prepare import add_usd, join_blocks, parse_payments
 
@@ -53,7 +55,7 @@ FX_FEATURES = [
     "receiver_avg_usd",
 ]
 
-FEATURES = BASIC_FEATURES + FX_FEATURES
+FEATURES = BASIC_FEATURES + FX_FEATURES + GRAPH_FEATURES
 
 
 
@@ -225,4 +227,6 @@ def build_fx_features(tables):
 def build_features(tables):
     basic = build_basic_features(tables)
     fx = build_fx_features(tables)
-    return basic.merge(fx, on="TRANSACTION_HASH", how="left", validate="one_to_one")
+    graph = build_graph_features(tables)
+    out = basic.merge(fx, on="TRANSACTION_HASH", how="left", validate="one_to_one")
+    return out.merge(graph, on="TRANSACTION_HASH", how="left", validate="one_to_one")

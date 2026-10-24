@@ -6,18 +6,23 @@ import sys
 from pathlib import Path
 
 from features import BASIC_FEATURES, FX_FEATURES, build_features
+from graph_features import GRAPH_FEATURES
 from pipeline import run_cv
 from prepare import load_tables
 
 LEG = FX_FEATURES[:10]
 PAYMENT = FX_FEATURES[10:13]
 ACCOUNT = FX_FEATURES[13:]
+GRAPH_TX = [c for c in GRAPH_FEATURES if c.startswith("g_")]
+GRAPH_ACC = [c for c in GRAPH_FEATURES if not c.startswith("g_")]
 
 STEPS = [
     ("basic", BASIC_FEATURES),
     ("+ leg", BASIC_FEATURES + LEG),
     ("+ payment", BASIC_FEATURES + LEG + PAYMENT),
     ("+ account", BASIC_FEATURES + LEG + PAYMENT + ACCOUNT),
+    ("+ graph tx", BASIC_FEATURES + FX_FEATURES + GRAPH_TX),
+    ("+ graph acc", BASIC_FEATURES + FX_FEATURES + GRAPH_TX + GRAPH_ACC),
 ]
 
 
