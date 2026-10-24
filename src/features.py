@@ -854,6 +854,389 @@ def build_laundering_pattern_features(payments):
     return result
 
 
+def build_advanced_graph_features(payments):
+    from collections import defaultdict, deque
+
+    feature_names = [
+        "matched_incoming_ratio_1h",
+        "matched_incoming_gap_seconds",
+        "two_hop_amount_similarity",
+        "three_hop_amount_similarity",
+        "fanin_unique_senders_1h",
+        "fanout_unique_receivers_1h",
+        "fanin_fanout_ratio_24h",
+        "sender_cycle_2hop",
+        "sender_cycle_3hop",
+        "sender_near_identical_burst_1h",
+        "fanin_usd_1h",
+        "fanout_usd_1h",
+        "fanin_to_current_ratio_1h",
+        "sender_chain_match_count_24h",
+        "amount_preserving_2hop_90",
+        "amount_preserving_3hop_90",
+        "rapid_amount_preserving_2hop_1h",
+    ]
+
+    HOUR = 3600
+    DAY = 86400
+
+    df = payments[
+        [
+            "TRANSACTION_HASH",
+            "TIMESTAMP",
+            "FROM_ADDRESS",
+            "TO_ADDRESS",
+            "usd_value",
+        ]
+    ].copy()
+
+    df["TIMESTAMP"] = pd.to_numeric(
+        df["TIMESTAMP"], errors="raise"
+    )
+    df["usd_value"] = pd.to_numeric(
+        df["usd_value"], errors="coerce"
+    ).fillna(0.0)
+
+    df = df.sort_values(
+        ["TIMESTAMP", "TRANSACTION_HASH"],
+        kind="mergesort"
+    ).reset_index(drop=True)
+
+    n = len(df)
+
+    output = {
+        name: np.zeros(n, dtype=float)
+        for name in feature_names
+    }
+
+    output["matched_incoming_gap_seconds"][:] = -1.0
+
+    # Each incoming record:
+    # (timestamp, sender, amount, previous_chain_similarity)
+    incoming = defaultdict(deque)
+
+    # Each outgoing record:
+    # (timestamp, receiver, amount, previous_chain_similarity)
+    outgoing = defaultdict(deque)
+
+    def amount_similarity(a, b):
+        a = abs(float(a))
+        b = abs(float(b))
+
+        if a == 0 and b == 0:
+            return 1.0
+
+        if a == 0 or b == 0:
+            return 0.0
+
+        return min(a, b) / max(a, b)
+
+    def prune(history, current_time):
+        cutoff = current_time - DAY
+
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
+    records = df.to_dict("records")
+
+    start = 0
+
+    while start < n:
+        current_time = records[start]["TIMESTAMP"]
+
+        end = start + 1
+
+        while (
+            end < n
+            and records[end]["TIMESTAMP"] == current_time
+        ):
+            end += 1
+
+        pending_updates = []
+
+        # Calculate features before inserting transactions
+        # with the same timestamp into history.
+        for k in range(start, end):
+            row = records[k]
+
+            sender = row["FROM_ADDRESS"]
+            receiver = row["TO_ADDRESS"]
+            amount = max(float(row["usd_value"]), 0.0)
+
+            sender_in = incoming[sender]
+            sender_out = outgoing[sender]
+            receiver_out = outgoing[receiver]
+
+            prune(sender_in, current_time)
+            prune(sender_out, current_time)
+            prune(receiver_out, current_time)
+
+            # -----------------------------------------
+            # 1. Incoming amount matching
+            # -----------------------------------------
+
+            best_one_hour = 0.0
+            best_two_hop = 0.0
+            best_three_hop = 0.0
+
+            best_match_gap = -1.0
+            best_match_score = -1.0
+
+            chain_match_count = 0
+
+            incoming_1h = []
+            incoming_24h = list(sender_in)
+
+            for previous in incoming_24h:
+                previous_time = previous[0]
+                previous_amount = previous[2]
+                previous_chain_similarity = previous[3]
+
+                similarity = amount_similarity(
+                    amount, previous_amount
+                )
+
+                gap = current_time - previous_time
+
+                best_two_hop = max(
+                    best_two_hop, similarity
+                )
+
+                if similarity > best_match_score:
+                    best_match_score = similarity
+                    best_match_gap = gap
+
+                if similarity >= 0.90:
+                    chain_match_count += 1
+
+                if previous_chain_similarity > 0:
+                    best_three_hop = max(
+                        best_three_hop,
+                        min(
+                            similarity,
+                            previous_chain_similarity
+                        )
+                    )
+
+                if gap <= HOUR:
+                    incoming_1h.append(previous)
+
+                    best_one_hour = max(
+                        best_one_hour, similarity
+                    )
+
+            output["matched_incoming_ratio_1h"][k] = (
+                best_one_hour
+            )
+
+            output["matched_incoming_gap_seconds"][k] = (
+                best_match_gap
+            )
+
+            output["two_hop_amount_similarity"][k] = (
+                best_two_hop
+            )
+
+            output["three_hop_amount_similarity"][k] = (
+                best_three_hop
+            )
+
+            output["sender_chain_match_count_24h"][k] = (
+                chain_match_count
+            )
+
+            # -----------------------------------------
+            # 2. New amount-preserving flow indicators
+            # -----------------------------------------
+
+            output["amount_preserving_2hop_90"][k] = int(
+                best_two_hop >= 0.90
+            )
+
+            output["amount_preserving_3hop_90"][k] = int(
+                best_three_hop >= 0.90
+            )
+
+            output[
+                "rapid_amount_preserving_2hop_1h"
+            ][k] = int(
+                best_one_hour >= 0.90
+            )
+
+            # -----------------------------------------
+            # 3. Fan-in and fan-out
+            # -----------------------------------------
+
+            outgoing_1h = [
+                previous
+                for previous in sender_out
+                if current_time - previous[0] <= HOUR
+            ]
+
+            output["fanin_unique_senders_1h"][k] = len({
+                previous[1]
+                for previous in incoming_1h
+            })
+
+            output["fanout_unique_receivers_1h"][k] = len({
+                previous[1]
+                for previous in outgoing_1h
+            })
+
+            unique_incoming_24h = len({
+                previous[1]
+                for previous in sender_in
+            })
+
+            unique_outgoing_24h = len({
+                previous[1]
+                for previous in sender_out
+            })
+
+            output["fanin_fanout_ratio_24h"][k] = (
+                unique_incoming_24h
+                / (unique_outgoing_24h + 1)
+            )
+
+            # -----------------------------------------
+            # 4. Circular transfers
+            # -----------------------------------------
+
+            # Current A -> B completes a two-edge cycle
+            # if B -> A occurred previously.
+            #
+            # receiver_out stores earlier B -> ... transfers.
+
+            output["sender_cycle_2hop"][k] = int(
+                sender != receiver
+                and any(
+                    previous[1] == sender
+                    for previous in receiver_out
+                )
+            )
+
+            # Current A -> B completes a three-edge
+            # cycle if earlier B -> C -> A occurred.
+
+            three_hop_cycle = False
+
+            for previous in sender_in:
+                intermediary = previous[1]
+                intermediary_to_sender_time = previous[0]
+
+                if intermediary in (sender, receiver):
+                    continue
+
+                intermediary_in = incoming[intermediary]
+                prune(intermediary_in, current_time)
+
+                if any(
+                    earlier[1] == receiver
+                    and earlier[0] < intermediary_to_sender_time
+                    for earlier in intermediary_in
+                ):
+                    three_hop_cycle = True
+                    break
+
+            output["sender_cycle_3hop"][k] = int(
+                three_hop_cycle
+            )
+
+            # -----------------------------------------
+            # 5. Repeated near-identical payments
+            # -----------------------------------------
+
+            output[
+                "sender_near_identical_burst_1h"
+            ][k] = sum(
+                amount_similarity(
+                    amount, previous[2]
+                ) >= 0.99
+                for previous in outgoing_1h
+            )
+
+            # -----------------------------------------
+            # 6. Recent incoming and outgoing volume
+            # -----------------------------------------
+
+            fanin_usd = sum(
+                previous[2]
+                for previous in incoming_1h
+            )
+
+            fanout_usd = sum(
+                previous[2]
+                for previous in outgoing_1h
+            )
+
+            output["fanin_usd_1h"][k] = fanin_usd
+            output["fanout_usd_1h"][k] = fanout_usd
+
+            output["fanin_to_current_ratio_1h"][k] = (
+                fanin_usd / (amount + 1.0)
+            )
+
+            # -----------------------------------------
+            # 7. Prepare history update
+            # -----------------------------------------
+
+            # For a future payment sent by the receiver,
+            # this transaction becomes its incoming edge.
+            #
+            # The chain similarity records whether the
+            # sender previously received a similar amount.
+
+            pending_updates.append(
+                (
+                    current_time,
+                    sender,
+                    receiver,
+                    amount,
+                    best_two_hop,
+                )
+            )
+
+        # Only update history after every transaction
+        # at the current timestamp has been evaluated.
+
+        for (
+            timestamp,
+            sender,
+            receiver,
+            amount,
+            chain_similarity,
+        ) in pending_updates:
+
+            outgoing[sender].append(
+                (
+                    timestamp,
+                    receiver,
+                    amount,
+                    chain_similarity,
+                )
+            )
+
+            incoming[receiver].append(
+                (
+                    timestamp,
+                    sender,
+                    amount,
+                    chain_similarity,
+                )
+            )
+
+        start = end
+
+    result = pd.DataFrame(output)
+    result.insert(
+        0,
+        "TRANSACTION_HASH",
+        df["TRANSACTION_HASH"].values
+    )
+
+    return result
+
+
 # ============================================================
 # 9. COMBINE ALL FEATURES
 # ============================================================
@@ -874,10 +1257,12 @@ def build_features(directory):
     )
 
     payments["usd_value"] = pd.to_numeric(
-        payments["VALUE"], errors="coerce"
+        payments["VALUE"],
+        errors="coerce"
     )
 
     leg_features = build_leg_features(transfers)
+
     payment_features = build_payment_features(payments)
 
     historical_features = (
@@ -885,15 +1270,21 @@ def build_features(directory):
     )
 
     time_features = build_time_features(payments)
+
     flow_features = build_flow_features(payments)
 
     xrpl_features = build_xrpl_features(
-        transactions, transfers
+        transactions,
+        transfers
     )
 
     behavior_features = build_behavior_features(payments)
 
     laundering_features = build_laundering_pattern_features(
+        payments
+    )
+
+    advanced_graph_features = build_advanced_graph_features(
         payments
     )
 
@@ -910,7 +1301,8 @@ def build_features(directory):
         flow_features,
         xrpl_features,
         behavior_features,
-        laundering_features
+        laundering_features,
+        advanced_graph_features,
     ]:
         features = features.merge(
             additional,
@@ -920,6 +1312,7 @@ def build_features(directory):
         )
 
     assert features["TRANSACTION_HASH"].is_unique
+
     assert len(features) == len(leg_features)
 
     assert set(features["TRANSACTION_HASH"]) == set(
@@ -936,19 +1329,34 @@ def build_features(directory):
 if __name__ == "__main__":
 
     for split in ["train", "validation"]:
+
         features = build_features(ROOT / split)
 
-        output_path = ROOT / f"{split}_features.csv"
+        output_path = (
+            ROOT / f"{split}_features_advanced.csv"
+        )
 
-        features.to_csv(output_path, index=False)
+        features.to_csv(
+            output_path,
+            index=False
+        )
 
         print(f"\n{split.upper()}")
-        print("Feature shape:", features.shape)
+
+        print(
+            "Feature shape:",
+            features.shape
+        )
+
         print(
             "Missing USD values:",
             features["usd_value"].isna().sum()
         )
-        print("Saved to:", output_path)
+
+        print(
+            "Saved to:",
+            output_path
+        )
 
         numeric = features.drop(
             columns=["TRANSACTION_HASH"]
@@ -958,7 +1366,12 @@ if __name__ == "__main__":
             "Missing feature values:",
             int(numeric.isna().sum().sum())
         )
+
         print(
             "Infinite feature values:",
-            int(np.isinf(numeric.to_numpy(dtype=float)).sum())
+            int(
+                np.isinf(
+                    numeric.to_numpy(dtype=float)
+                ).sum()
+            )
         )
