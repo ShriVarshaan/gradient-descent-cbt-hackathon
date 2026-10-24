@@ -10,8 +10,9 @@ Load it with torch.load(path, weights_only=False).
 
 Nodes: 'account' and 'tx'. Every transfer leg adds account -[sends]-> tx (its
 FROM_ADDRESS) and tx -[receives]-> account (its TO_ADDRESS), so liquidity
-providers on conversions join the graph too; reverse edges are added by
-ToUndirected. Features use the whole supplied window, which the rules allow.
+providers on conversions join the graph too. Two tx -> tx relations link payments
+in time: 'flows' (a's destination sends b within --flow-window, k nearest) and
+'bursts' (same sender within 10 minutes). Reverse edges are added by ToUndirected. Features use the whole supplied window, which the rules allow.
 Assets are encoded by currency symbol only: issuer addresses differ between splits.
 """
 import argparse
@@ -153,6 +154,28 @@ def account_features(tx, tr, accounts, sender_10m):
     return a.astype(float)
 
 
+def flow_edges(tx, window, k):
+    """tx a -> tx b when a's destination sends b within `window` seconds after a (k nearest per a)."""
+    a = tx[["DEST", "TS", "usd_last"]].reset_index().rename(columns={"index": "a"})
+    b = tx[["ACCOUNT", "TS", "usd_first"]].reset_index().rename(columns={"index": "b", "TS": "TS_B"})
+    e = a.merge(b, left_on="DEST", right_on="ACCOUNT")
+    e["gap"] = e.TS_B - e.TS
+    e = e[(e.gap > 0) & (e.gap <= window)]
+    e = e.sort_values(["a", "gap"]).groupby("a").head(k)
+    attr = pd.DataFrame({"log_gap": np.log1p(e.gap.values),
+                         "log_amount_ratio": np.log(e.usd_first.values / e.usd_last.values).clip(-5, 5)})
+    return e.a.values, e.b.values, attr
+
+
+def burst_edges(tx, window):
+    """tx a <-> tx b when the same sender sends both within `window` seconds."""
+    s = tx[["ACCOUNT", "TS"]].reset_index()
+    e = s.merge(s, on="ACCOUNT", suffixes=("_a", "_b"))
+    e = e[(e.index_a != e.index_b) & ((e.TS_b - e.TS_a).abs() <= window)]
+    attr = pd.DataFrame({"log_gap": np.log1p((e.TS_b - e.TS_a).abs().values)})
+    return e.index_a.values, e.index_b.values, attr
+
+
 def standardise(df, rows, stats):
     if stats is None:
         fit = df.loc[rows] if rows is not None else df
@@ -161,7 +184,7 @@ def standardise(df, rows, stats):
     return torch.tensor(x, dtype=torch.float), stats
 
 
-def build(split, stats=None):
+def build(split, stats=None, tx_edges=True, flow_window=24 * 3600, flow_k=5, burst_window=600):
     tx_raw, tr_raw, rates, labels = load(split)
     tr = value_legs(tr_raw, rates)
     tx = tx_table(tx_raw, tr)
@@ -203,9 +226,16 @@ def build(split, stats=None):
     data["account", "sends", "tx"].edge_attr = edge_attr
     data["tx", "receives", "account"].edge_index = torch.stack([leg_tx, dst])
     data["tx", "receives", "account"].edge_attr = edge_attr
-    data = T.ToUndirected()(data)
-
     names = {"tx": list(f_tx.columns), "account": list(f_acc.columns), "edge": list(f_edge.columns)}
+
+    # direct tx -> tx links in time, so 2 layers can see relays and bursts instead of week-long account averages
+    if tx_edges:
+        for rel, (a, b, attr) in [("flows", flow_edges(tx, flow_window, flow_k)),
+                                  ("bursts", burst_edges(tx, burst_window))]:
+            data["tx", rel, "tx"].edge_index = torch.tensor(np.stack([a, b]), dtype=torch.long)
+            data["tx", rel, "tx"].edge_attr, stats[rel] = standardise(attr, None, None if fit else stats[rel])
+            names[rel] = list(attr.columns)
+    data = T.ToUndirected(merge=False)(data)     # keep flow direction: adds rev_flows instead of merging
     return data, stats, names
 
 
@@ -214,9 +244,12 @@ def main():
     p.add_argument("split_dir")
     p.add_argument("out")
     p.add_argument("--stats", help="graph .pt built from train; reuse its normalisation for val/test")
+    p.add_argument("--no-tx-edges", action="store_true", help="bipartite account <-> tx edges only")
+    p.add_argument("--flow-window", type=int, default=24 * 3600, help="seconds for tx -> next tx of its destination")
+    p.add_argument("--flow-k", type=int, default=5, help="max flow edges per tx")
     args = p.parse_args()
     stats = torch.load(args.stats, weights_only=False)["stats"] if args.stats else None
-    data, stats, names = build(args.split_dir, stats)
+    data, stats, names = build(args.split_dir, stats, not args.no_tx_edges, args.flow_window, args.flow_k)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     torch.save({"data": data, "stats": stats, "names": names}, args.out)
     print(data)
