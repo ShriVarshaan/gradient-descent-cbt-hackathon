@@ -53,7 +53,8 @@ def symbol_onehot(symbols, prefix):
 def next_event(queries, events, direction, value_col):
     """For each (account, TS) query, the gap to and value of that account's next/previous event."""
     q = queries[["ACC", "TS"]].reset_index().sort_values("TS")
-    e = events[["ACC", "TS", value_col]].rename(columns={"TS": "TS_E"}).sort_values("TS_E")
+    # Break ties between events at the same second by value, so row order in the input can't change the result.
+    e = events[["ACC", "TS", value_col]].rename(columns={"TS": "TS_E"}).sort_values(["TS_E", value_col])
     m = pd.merge_asof(q, e, left_on="TS", right_on="TS_E", by="ACC",
                       direction=direction, allow_exact_matches=False).set_index("index").sort_index()
     return (m.TS_E - m.TS).abs(), m[value_col]
