@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 from graph_features import GRAPH_FEATURES, build_graph_features
 from history_features import (
     HISTORY_FEATURES,
+    build_advanced_graph_features,
     build_behavior_features,
     build_flow_features,
     build_historical_account_graph_features,
@@ -186,6 +187,7 @@ def build_fx_features(tables):
         build_xrpl_features(tables["transactions"], tables["transfers"]),
         build_behavior_features(payments),
         build_laundering_pattern_features(payments),
+        build_advanced_graph_features(payments),
     ]:
         features = features.merge(
             additional, on="TRANSACTION_HASH", how="left", validate="one_to_one"

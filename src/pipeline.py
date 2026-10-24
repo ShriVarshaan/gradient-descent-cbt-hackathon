@@ -14,8 +14,9 @@ from features import FEATURES, build_features
 from prepare import load_tables
 
 # Tuned on the 4 time folds: every fold improves over the 300-tree, 31-leaf default.
+# colsample_bytree=0.5 (Step 4): chosen on folds 0-2, also better on held-out fold 3, for 3 seeds.
 PARAMS = dict(n_estimators=800, learning_rate=0.02, num_leaves=63, min_child_samples=50,
-              random_state=0, verbose=-1)
+              colsample_bytree=0.5, random_state=0, verbose=-1)
 
 
 def run_cv(df, features=FEATURES):
