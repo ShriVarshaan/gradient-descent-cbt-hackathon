@@ -33,6 +33,27 @@ def parse_payments(tx):
     return out
 
 
+RIPPLE_EPOCH_OFFSET = 946684800  # blocks' CLOSE_TIME counts from 2000-01-01, not 1970
+
+
+def join_blocks(tx, blocks):
+    """Attach each transaction's ledger close time (Unix seconds, UTC)."""
+    close = blocks[["LEDGER_INDEX", "LEDGER_HASH", "CLOSE_TIME"]].assign(
+        close_time=lambda b: pd.to_numeric(b["CLOSE_TIME"]).astype("int64") + RIPPLE_EPOCH_OFFSET
+    )
+    joined = tx.merge(
+        close[["LEDGER_INDEX", "LEDGER_HASH", "close_time"]],
+        on=["LEDGER_INDEX", "LEDGER_HASH"],
+        how="left",
+        validate="many_to_one",
+    )
+    if len(joined) != len(tx) or joined["close_time"].isna().any():
+        raise ValueError("block join changed the row count or left transactions unmatched")
+    if (joined["close_time"] != pd.to_numeric(joined["TIMESTAMP"]).astype("int64")).any():
+        raise ValueError("block close time disagrees with transaction TIMESTAMP")
+    return joined
+
+
 def add_usd(transfers, rates):
     """USD value per leg, using the latest hourly rate at or before the leg's time."""
     is_xrp = transfers["SYMBOL"].eq("XRP")
