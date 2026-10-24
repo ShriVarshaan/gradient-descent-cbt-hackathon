@@ -1,6 +1,6 @@
 """Full-batch GraphSAGE on tx-node classification, scored with validation AP.
 
-    python gnn/train.py graphs/train.pt                                   # one run, default settings
+    python gnn/train.py graphs/train.pt                                   # one run, pos_weight=5
     python gnn/train.py graphs/train.pt --pos-weight 1 31 --seeds 0 1 2   # class-weight comparison
     python gnn/train.py graphs/train.pt --predict graphs/test.pt --out predictions.csv
 
@@ -84,8 +84,8 @@ def train_one(data, args, pos_weight, seed):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("train_graph")
-    p.add_argument("--pos-weight", type=float, nargs="+", default=[1.0],
-                   help="BCE pos_weight values to compare; ~31 balances the classes")
+    p.add_argument("--pos-weight", type=float, nargs="+", default=[5.0],
+                   help="BCE pos_weight values to compare; 5 was best on validation, ~31 balances the classes")
     p.add_argument("--seeds", type=int, nargs="+", default=[0])
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--layers", type=int, default=2)
